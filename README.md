@@ -1,6 +1,6 @@
-# gk-net
+# gk-fltr
 
-gk-net is a single static binary for a [gokrazy](https://gokrazy.org/) router.
+gk-fltr is a single static binary for a [gokrazy](https://gokrazy.org/) router.
 It uses [nDPI](https://github.com/ntop/nDPI) to block YouTube for chosen
 sources. A source can be matched by any of the following:
 
@@ -9,7 +9,7 @@ sources. A source can be matched by any of the following:
 - **JA4 client fingerprint**, such as `t13d1516h2_8daaf6152771_02713d6af862`.
   Patterns can use `*`, for example `t13d*_8daaf6152771_*`.
 
-YouTube is the default, but gk-net can block anything nDPI detects, such as
+YouTube is the default, but gk-fltr can block anything nDPI detects, such as
 Instagram, Facebook or TikTok, or whole categories like social networks. See
 [Choosing what to block](#choosing-what-to-block).
 
@@ -19,17 +19,17 @@ day, measured in active minutes and shared by a user's devices. See
 
 ## How it works
 
-1. gk-net installs its own nftables table, `inet gk_net`. The table has one
+1. gk-fltr installs its own nftables table, `inet gk_fltr`. The table has one
    forward chain at priority -10. Other tables are left alone.
-2. The chain hands the first ~32 packets of each forwarded connection to gk-net.
+2. The chain hands the first ~32 packets of each forwarded connection to gk-fltr.
    It uses the `ct packets` and `ct direction` expressions. This happens in one
    of two modes:
-   - **Queue (inline)**: the packets are held in **NFQUEUE** until gk-net
+   - **Queue (inline)**: the packets are held in **NFQUEUE** until gk-fltr
      decides. The packet that identifies YouTube, such as the TLS ClientHello
      or QUIC Initial, is dropped, so nothing from a blocked connection reaches
      the server. Once a connection is allowed, it goes into an allow set, and
      its remaining packets skip the queue. Needs `CONFIG_NFT_QUEUE`.
-   - **Log (passive)**: copies of the packets go to gk-net over **NFLOG**,
+   - **Log (passive)**: copies of the packets go to gk-fltr over **NFLOG**,
      and the packets themselves pass immediately. The block lands right behind
      the packet that identified YouTube, so that one packet (usually the
      ClientHello) still reaches the server. Needs
@@ -37,16 +37,16 @@ day, measured in active minutes and shared by a user's devices. See
 
    `-mode=auto` (the default) uses queue mode. It falls back to log mode only
    with `-fail-open`, because log mode cannot fail closed (see below).
-3. gk-net feeds those packets to nDPI. This step identifies YouTube from the
+3. gk-fltr feeds those packets to nDPI. This step identifies YouTube from the
    TLS/QUIC SNI or the HTTP host, and computes the client's JA4 fingerprint.
    The client's MAC address comes from the packet's link-layer header, or from
    `/proc/net/arp` if the header is missing.
 4. Suppose a flow is YouTube (`YouTube`, `YouTubeUpload` or `YouTubeKids`) and
-   its source matches a rule. gk-net then adds the flow's 5-tuple to an
+   its source matches a rule. gk-fltr then adds the flow's 5-tuple to an
    nftables set that has a timeout.
 5. After that, the chain rejects every packet of the flow in the kernel. It
    sends a TCP RST for TCP and an ICMP admin-prohibited message for QUIC.
-   gk-net also tells the client right away, so the connection fails at once
+   gk-fltr also tells the client right away, so the connection fails at once
    instead of hanging:
    - for TCP, a RST built from the client's own ACK number
    - for QUIC, an ICMP port unreachable that quotes the client's Initial
@@ -59,20 +59,20 @@ IPs keep working.
 
 ### Failing closed (default) or open
 
-By default gk-net **fails closed**. If it crashes or hangs, its queue rules
+By default gk-fltr **fails closed**. If it crashes or hangs, its queue rules
 stay installed with no one listening. If it falls behind until the queue
 fills, or cannot track a new flow, the packets are dropped instead of passing
 unfiltered. Already-established connections keep working, but new connections
-stall until gk-net is back. On gokrazy, gk-net is restarted automatically, and
-a restarted gk-net takes over the leftover rules. Stopping gk-net on purpose
+stall until gk-fltr is back. On gokrazy, gk-fltr is restarted automatically, and
+a restarted gk-fltr takes over the leftover rules. Stopping gk-fltr on purpose
 (SIGTERM, such as stopping it from the gokrazy web interface) removes its table
 and restores normal traffic.
 
 With `-fail-open`, the queue rules use `bypass` and the queue is opened in
-fail-open mode, so traffic passes unfiltered while gk-net is down or
+fail-open mode, so traffic passes unfiltered while gk-fltr is down or
 overloaded.
 
-Log mode only sees copies of packets, so it always fails open. gk-net warns
+Log mode only sees copies of packets, so it always fails open. gk-fltr warns
 about this when started with `-mode=log`, and without `-fail-open`,
 `-mode=auto` refuses to start rather than fall back to it.
 
@@ -86,7 +86,7 @@ All of these must be built in (`=y`): `NF_TABLES_INET`, `NFT_CT`,
 
 The stock gokrazy kernels support log mode only, so they need `-mode=log` (or
 `-fail-open`). [kernel.q6a](https://github.com/ascension-association/kernel.q6a),
-for the Radxa Dragon Q6A, supports both modes, so gk-net runs inline and fails
+for the Radxa Dragon Q6A, supports both modes, so gk-fltr runs inline and fails
 closed there.
 
 ### QUIC
@@ -107,7 +107,7 @@ C cross compiler, and autotools (`autoconf automake libtool pkg-config make`).
 
 ```sh
 make ndpi   # downloads nDPI 6.0 and builds a static libndpi.a for amd64 and arm64
-make        # builds bin/gk-net-amd64 and bin/gk-net-arm64 (fully static, about 5 MB)
+make        # builds bin/gk-fltr-amd64 and bin/gk-fltr-arm64 (fully static, about 5 MB)
 make test
 ```
 
@@ -116,19 +116,19 @@ To build for one architecture only, run `make ndpi ARCHS=arm64` and
 
 `scripts/netns-test.sh` runs an end-to-end test without root. It uses
 unprivileged network namespaces to build client, router and server
-namespaces, runs gk-net with real nftables and NFQUEUE or NFLOG, and checks
+namespaces, runs gk-fltr with real nftables and NFQUEUE or NFLOG, and checks
 the following:
 - TLS-over-TCP and QUIC connections to YouTube hostnames fail immediately,
   while other connections succeed.
 - Every block is written to the JSON block log.
 - After `kill -9`, new connections stall (fail closed) or pass (fail open).
 
-Pass gk-net flags after the binary to choose the configuration:
+Pass gk-fltr flags after the binary to choose the configuration:
 
 ```sh
-scripts/netns-test.sh bin/gk-net-amd64 -ip 192.168.1.10              # queue, fail closed
-scripts/netns-test.sh bin/gk-net-amd64 -ip 192.168.1.10 -fail-open
-scripts/netns-test.sh bin/gk-net-amd64 -mode log -ip 192.168.1.10
+scripts/netns-test.sh bin/gk-fltr-amd64 -ip 192.168.1.10              # queue, fail closed
+scripts/netns-test.sh bin/gk-fltr-amd64 -ip 192.168.1.10 -fail-open
+scripts/netns-test.sh bin/gk-fltr-amd64 -mode log -ip 192.168.1.10
 ```
 
 `scripts/netns-allowance-test.sh` tests daily allowances the same way: a 4
@@ -138,12 +138,12 @@ use survives a restart.
 ## Deploying on gokrazy
 
 gokrazy has no C runtime, so the binary must be fully statically linked, with
-cgo pointed at zig. The nDPI libraries are built locally, so add gk-net from a
+cgo pointed at zig. The nDPI libraries are built locally, so add gk-fltr from a
 local checkout rather than by module path:
 
 ```sh
-git clone https://github.com/ascension-association/gk-net
-cd gk-net && make ndpi ARCHS=arm64      # or amd64
+git clone https://github.com/ascension-association/gk-fltr
+cd gk-fltr && make ndpi ARCHS=arm64      # or amd64
 gok -i router add .
 ```
 
@@ -153,7 +153,7 @@ another arm64 device, and `x86_64-linux-musl` for a PC.
 
 ```json
 "PackageConfig": {
-    "github.com/ascension-association/gk-net": {
+    "github.com/ascension-association/gk-fltr": {
         "GoBuildEnvironment": [
             "CGO_ENABLED=1",
             "CC=zig cc -target aarch64-linux-musl"
@@ -162,9 +162,9 @@ another arm64 device, and `x86_64-linux-musl` for a PC.
             "-ldflags=-s -w -linkmode=external '-extldflags=-static -s'"
         ],
         "CommandLineFlags": [
-            "-rules=/perm/gk-net/rules.txt",
-            "-block-log=/perm/gk-net/blocks.jsonl",
-            "-state=/perm/gk-net/state.json",
+            "-rules=/perm/gk-fltr/rules.txt",
+            "-block-log=/perm/gk-fltr/blocks.jsonl",
+            "-state=/perm/gk-fltr/state.json",
             "-timezone=America/Denver"
         ]
     }
@@ -175,11 +175,11 @@ another arm64 device, and `x86_64-linux-musl` for a PC.
 
 Rules can go in `CommandLineFlags`, for example `"-ip=192.168.1.0/28"` or
 `"-mac=aa:bb:cc:dd:ee:ff"`. They can also go in a rules file on the permanent
-partition. gk-net checks the rules file every 15 seconds and reloads it when it
+partition. gk-fltr checks the rules file every 15 seconds and reloads it when it
 changes, so you can edit it over breakglass without redeploying:
 
 ```
-# /perm/gk-net/rules.txt
+# /perm/gk-fltr/rules.txt
 # <ip|mac|ja4> <value> [user=NAME] [allow=DURATION]
 mac aa:bb:cc:dd:ee:01 user=alice allow=2h   # Alice's phone
 ip  192.168.1.23      user=alice            # Alice's laptop: shares her 2h
@@ -191,9 +191,9 @@ ja4 t13d1516h2_8daaf6152771_*               # a smart TV app: always blocked
 The first rule that matches a source applies, so put more specific rules
 (single devices) before broader ones (subnets).
 
-gk-net logs to stdout, which shows up in the gokrazy web interface. At startup it
+gk-fltr logs to stdout, which shows up in the gokrazy web interface. At startup it
 logs which mode it runs in, for example
-`gk-net running in queue (inline) mode`. If queue mode was unavailable, it also
+`gk-fltr running in queue (inline) mode`. If queue mode was unavailable, it also
 logs why it fell back. Each blocked flow is logged like this:
 
 ```
@@ -202,8 +202,8 @@ BLOCK tcp 192.168.1.10:49020 -> 142.250.1.1:443 TLS.YouTube mac=02:00:00:00:00:1
 
 ### Block log
 
-With `-block-log=PATH`, gk-net also appends each blocked flow to `PATH` as one
-JSON object per line (JSON Lines). gk-net creates the file, and its directory,
+With `-block-log=PATH`, gk-fltr also appends each blocked flow to `PATH` as one
+JSON object per line (JSON Lines). gk-fltr creates the file, and its directory,
 if needed:
 
 ```json
@@ -228,7 +228,7 @@ that long each day instead of blocking it outright:
   must agree). A rule with `allow=` but no user has an allowance of its own.
   `-allowance=DURATION` sets the allowance of rules and users that have no
   `allow=`. The default is 0, which means always blocked.
-- **Active minutes.** Only time spent actually using YouTube counts. gk-net
+- **Active minutes.** Only time spent actually using YouTube counts. gk-fltr
   admits a user's YouTube connections while they have time left, and counts
   each connection's bytes with nftables per-element counters. Every minute
   (`-usage-interval`) in which a user's YouTube connections moved at least
@@ -236,7 +236,7 @@ that long each day instead of blocking it outright:
   megabytes per minute. A paused video or an idle background tab only sends
   keepalives, so it isn't charged. A user watching on two devices at once is
   charged once per minute, not twice.
-- **Running out.** When a user's time is used up, gk-net blocks their open
+- **Running out.** When a user's time is used up, gk-fltr blocks their open
   YouTube connections, which then end immediately. TCP connections are reset;
   QUIC connections get an ICMP error. New YouTube connections are blocked until
   the reset. These blocks are written to the block log with
@@ -245,7 +245,7 @@ that long each day instead of blocking it outright:
   `-timezone`. On gokrazy the local timezone is UTC unless set, so set
   `-timezone`, for example `-timezone=America/Denver`. The timezone database
   is built into the binary.
-- **Persistence.** With `-state=PATH`, gk-net keeps each user's use for the
+- **Persistence.** With `-state=PATH`, gk-fltr keeps each user's use for the
   day, and the connections it is metering, in a JSON file. A restart doesn't
   reset anyone's time, and connections metered before the restart keep being
   counted.
@@ -257,7 +257,7 @@ METER tcp 192.168.1.10:55590 -> 142.250.1.1:443 TLS.YouTube mac=aa:bb:cc:dd:ee:0
 allowance alice: 2h used up; blocking its connections until Tue 00:00 MDT
 ```
 
-With `-v`, gk-net also logs each minute charged. `state.json` shows the use so
+With `-v`, gk-fltr also logs each minute charged. `state.json` shows the use so
 far today, in seconds, under `used_seconds`.
 
 The accuracy is one usage interval. The interval in which a connection starts
@@ -269,7 +269,7 @@ connections are cut at the next usage interval.
 ### If the nftables ruleset is flushed
 
 If another program flushes the whole nftables ruleset (for example
-`nft flush ruleset`), gk-net's table goes with it. gk-net checks for its
+`nft flush ruleset`), gk-fltr's table goes with it. gk-fltr checks for its
 table every second and reinstalls it if it is missing, including its blocked
 and metered connections. Filtering pauses during that window, and traffic
 passes unfiltered then even when failing closed, because the rules themselves
@@ -283,7 +283,7 @@ are gone.
 `protocols` subcommand to find names:
 
 ```
-$ gk-net protocols insta face
+$ gk-fltr protocols insta face
 NAME               CATEGORY       BREED
 Facebook           SocialNetwork  Fun
 FacebookMessenger  Chat           Acceptable
@@ -294,10 +294,10 @@ Instagram          SocialNetwork  Fun
 The subcommand matches each query against protocol names and categories.
 Related options:
 
-- `gk-net protocols -category SocialNetwork` lists one category.
-- `gk-net protocols -categories` lists all categories with their protocol
+- `gk-fltr protocols -category SocialNetwork` lists one category.
+- `gk-fltr protocols -categories` lists all categories with their protocol
   counts.
-- `gk-net protocols` with no query lists everything, about 490 protocols.
+- `gk-fltr protocols` with no query lists everything, about 490 protocols.
 
 For example:
 
@@ -318,14 +318,14 @@ category at startup.
 
 ## Finding JA4 fingerprints
 
-- Run gk-net with `-v`. It then logs every classified flow with its MAC, host
+- Run gk-fltr with `-v`. It then logs every classified flow with its MAC, host
   and JA4, not just the blocked ones.
 - Or capture traffic on any Linux machine and classify the capture offline,
   using the same flags as on the router:
 
   ```sh
   tcpdump -i eth0 -w capture.pcap
-  ./bin/gk-net-amd64 inspect -v -ja4 't13d1516h2_*' capture.pcap
+  ./bin/gk-fltr-amd64 inspect -v -ja4 't13d1516h2_*' capture.pcap
   ```
 
   `inspect` reads classic pcap files (Ethernet, raw IP, Linux SLL/SLL2). It
@@ -346,17 +346,17 @@ with a distinctive TLS stack, such as a smart TV's YouTube app.
 | `-reset-time`, `-timezone` | `00:00`, `Local` | When daily allowances reset |
 | `-usage-interval` | `1m` | How often use is measured; each active interval is charged in full |
 | `-active-bytes` | `65536` | Bytes per interval for YouTube use to count as active |
-| `-protocols` | `YouTube,YouTubeUpload,YouTubeKids` | nDPI protocol names, or `category:NAME`, to block; see `gk-net protocols` |
+| `-protocols` | `YouTube,YouTubeUpload,YouTubeKids` | nDPI protocol names, or `category:NAME`, to block; see `gk-fltr protocols` |
 | `-block-timeout` | `10m` | How long a blocked connection stays in the set |
 | `-max-packets` | `24` | Packets per flow to classify before giving up |
 | `-mode` | `auto` | `queue` (inline), `log` (passive) or `auto` (queue; log only with `-fail-open`) |
-| `-fail-open` | `false` | Let traffic through unfiltered when gk-net is down or overloaded |
+| `-fail-open` | `false` | Let traffic through unfiltered when gk-fltr is down or overloaded |
 | `-block-log` | | Append blocked flows as JSON lines to this file |
 | `-block-log-max-size` | `10485760` | Rotate the block log to `FILE.1` beyond this many bytes; 0 for no limit |
 | `-no-reset` | `false` | Don't send TCP RSTs or ICMP errors to blocked clients |
 | `-queue-num` | `4269` | NFQUEUE numbers in queue mode; this one and the next are used |
 | `-nflog-group` | `4269` | NFLOG group in log mode |
-| `-table`, `-priority` | `gk_net`, `-10` | nftables table name and forward chain priority |
+| `-table`, `-priority` | `gk_fltr`, `-10` | nftables table name and forward chain priority |
 | `-ndpi-license` | `not-for-profit` | nDPI 6 license mode; see below |
 | `-v` | `false` | Log every classified flow |
 
@@ -368,15 +368,15 @@ with a distinctive TLS stack, such as a smart TV's YouTube app.
   router's L2 segments. Phones may use a randomized MAC per network.
 - **Encrypted Client Hello (ECH)**: if YouTube starts accepting ECH, the SNI
   would be hidden and detection would rely on nDPI's other heuristics. VPNs and
-  proxies also bypass gk-net.
+  proxies also bypass gk-fltr.
 - **QUIC connection migration**: a QUIC connection that changes address after
   its handshake has no ClientHello for nDPI to see. Blocked connections never
-  finish the handshake, so this only matters if gk-net was not running when the
+  finish the handshake, so this only matters if gk-fltr was not running when the
   connection was set up.
 
 ## Licensing
 
-gk-net is BSD-3-Clause. It statically links nDPI, which is LGPLv3, with some
+gk-fltr is BSD-3-Clause. It statically links nDPI, which is LGPLv3, with some
 dissectors dual-licensed from nDPI 6.0 on (see nDPI's `README.license.md`).
 `-ndpi-license` selects which dissectors are enabled:
 

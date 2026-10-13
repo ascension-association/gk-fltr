@@ -11,8 +11,8 @@ import (
 	"github.com/florianl/go-nfqueue/v2"
 	"github.com/mdlayher/netlink"
 
-	"github.com/ascension-association/gk-net/internal/engine"
-	"github.com/ascension-association/gk-net/internal/firewall"
+	"github.com/ascension-association/gk-fltr/internal/engine"
+	"github.com/ascension-association/gk-fltr/internal/firewall"
 )
 
 // listenQueue receives the packets of one conntrack direction from NFQUEUE
@@ -21,7 +21,7 @@ func listenQueue(ctx context.Context, num uint16, dir engine.Dir, failOpen bool,
 	// GSO: don't make the kernel segment large packets just to queue them.
 	flags := uint32(nfqueue.NfQaCfgFlagGSO)
 	if failOpen {
-		// Accept packets rather than drop them if gk-net falls behind and
+		// Accept packets rather than drop them if gk-fltr falls behind and
 		// the queue fills up.
 		flags |= nfqueue.NfQaCfgFlagFailOpen
 	}

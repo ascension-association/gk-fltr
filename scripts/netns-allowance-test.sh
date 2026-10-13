@@ -5,9 +5,9 @@
 # The client (user "kid", identified by MAC) gets a 4 s allowance, measured
 # in 1 s intervals. A YouTube stream must run, be cut off once the allowance
 # is used up, and new YouTube connections must then be blocked, also after
-# gk-net restarts (the use is persisted). Other sites keep working.
+# gk-fltr restarts (the use is persisted). Other sites keep working.
 #
-# usage: scripts/netns-allowance-test.sh [bin/gk-net-amd64] [gk-net flags...]
+# usage: scripts/netns-allowance-test.sh [bin/gk-fltr-amd64] [gk-fltr flags...]
 #        e.g. -mode log
 set -eu
 . "$(dirname "$0")/netns-lib.sh"
@@ -45,7 +45,7 @@ if [ "${used:-0}" -ge 4 ]; then echo "PASS state.json: kid used ${used}s"; else 
 n=$(grep -c '"reason":"allowance_exhausted"' blocks.jsonl || true)
 if [ "$n" -ge 3 ]; then echo "PASS block log: $n allowance_exhausted entries"; else echo "FAIL block log: $n allowance_exhausted entries, want >= 3"; fail=1; fi
 
-echo "restarting gk-net"
+echo "restarting gk-fltr"
 gk_stop TERM
 gk_start $flags "$@"
 check client www.youtube.com reset    # still used up after the restart
@@ -59,5 +59,5 @@ check quic www.youtube.com refused
 gk_stop TERM
 
 netns_cleanup
-echo "--- gk-net log"; cat gk.log
+echo "--- gk-fltr log"; cat gk.log
 exit $fail

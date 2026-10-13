@@ -4,18 +4,18 @@
 #   client (192.168.1.10, MAC 02:00:00:00:00:10) -- router -- server (203.0.113.10)
 #
 # The server (test/tlsprobe) answers TLS and QUIC on :443 and streams data
-# endlessly on :444. gk-net runs in the router namespace, which is the one the
+# endlessly on :444. gk-fltr runs in the router namespace, which is the one the
 # test script itself runs in.
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # netns_init re-executes the calling script inside a new user and network
-# namespace, then builds the topology. Afterwards $GK is the gk-net binary,
+# namespace, then builds the topology. Afterwards $GK is the gk-fltr binary,
 # "$@" are the remaining arguments, and $WORK is a temporary directory.
 # The caller must pass its arguments through: netns_init "$@"; shift $NETNS_SHIFT
 netns_init() {
   if [ "${IN_NETNS:-}" != 1 ]; then
-    GK="$(realpath "${1:-$ROOT/bin/gk-net-amd64}")"
+    GK="$(realpath "${1:-$ROOT/bin/gk-fltr-amd64}")"
     [ $# -gt 0 ] && shift
     WORK="$(mktemp -d)"
     trap 'rm -rf "$WORK"' EXIT
@@ -48,16 +48,16 @@ netns_init() {
   fail=0
 }
 
-# gk_start starts gk-net with the given flags, logging to gk.log.
+# gk_start starts gk-fltr with the given flags, logging to gk.log.
 gk_start() {
   "$GK" "$@" >> gk.log 2>&1 & G=$!
   sleep 1
-  kill -0 $G 2>/dev/null || { echo "gk-net failed to start:"; cat gk.log; netns_cleanup; exit 1; }
+  kill -0 $G 2>/dev/null || { echo "gk-fltr failed to start:"; cat gk.log; netns_cleanup; exit 1; }
 }
 
-# gk_stop stops gk-net with the given signal (default TERM).
+# gk_stop stops gk-fltr with the given signal (default TERM).
 gk_stop() {
-  kill -"${1:-TERM}" $G 2>/dev/null || echo "gk-net exited early"
+  kill -"${1:-TERM}" $G 2>/dev/null || echo "gk-fltr exited early"
   wait $G 2>/dev/null || true
 }
 

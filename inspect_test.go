@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ascension-association/gk-net/internal/netpkt"
+	"github.com/ascension-association/gk-fltr/internal/netpkt"
 )
 
 func writePcap(t *testing.T, frames ...[]byte) string {

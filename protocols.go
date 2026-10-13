@@ -8,18 +8,18 @@ import (
 	"strings"
 	"text/tabwriter"
 
-	"github.com/ascension-association/gk-net/internal/ndpi"
+	"github.com/ascension-association/gk-fltr/internal/ndpi"
 )
 
 // protocols searches the protocols nDPI can detect, to find names for
 // -protocols.
 func protocols(args []string) error {
-	fs := flag.NewFlagSet("gk-net protocols", flag.ExitOnError)
+	fs := flag.NewFlagSet("gk-fltr protocols", flag.ExitOnError)
 	license := fs.String("ndpi-license", "not-for-profit", "nDPI license mode: not-for-profit, for-profit-lgpl or for-profit-dual")
 	category := fs.String("category", "", "only list protocols in this category, e.g. SocialNetwork")
 	categories := fs.Bool("categories", false, "list the categories (with protocol counts) instead of protocols")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), `usage: gk-net protocols [flags] [QUERY...]
+		fmt.Fprintf(fs.Output(), `usage: gk-fltr protocols [flags] [QUERY...]
 
 Lists the protocols nDPI can detect whose name or category contains any QUERY
 (case-insensitive), or all of them. Use the names, or category:NAME, with
@@ -82,7 +82,7 @@ flags:
 		n++
 	}
 	if n == 0 {
-		return fmt.Errorf("no protocols match (try: gk-net protocols -categories)")
+		return fmt.Errorf("no protocols match (try: gk-fltr protocols -categories)")
 	}
 	return nil
 }
@@ -129,13 +129,13 @@ func resolveProtocols(mod *ndpi.Module, list string) ([]uint16, error) {
 				}
 			}
 			if n == 0 {
-				return nil, fmt.Errorf("no nDPI protocols in category %q (see: gk-net protocols -categories)", cat)
+				return nil, fmt.Errorf("no nDPI protocols in category %q (see: gk-fltr protocols -categories)", cat)
 			}
 			continue
 		}
 		id, ok := mod.ProtoID(entry)
 		if !ok {
-			return nil, fmt.Errorf("unknown nDPI protocol %q (see: gk-net protocols %s)", entry, entry)
+			return nil, fmt.Errorf("unknown nDPI protocol %q (see: gk-fltr protocols %s)", entry, entry)
 		}
 		add(id)
 	}

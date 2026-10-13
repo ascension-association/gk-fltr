@@ -1,4 +1,4 @@
-module github.com/ascension-association/gk-net
+module github.com/ascension-association/gk-fltr
 
 go 1.27.2
 

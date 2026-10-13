@@ -1,4 +1,4 @@
-// gk-net blocks YouTube (or other nDPI-detected protocols) on a gokrazy
+// gk-fltr blocks YouTube (or other nDPI-detected protocols) on a gokrazy
 // router for sources matching an IP address, MAC address or JA4 fingerprint.
 //
 // The first packets of every forwarded connection are handed to userspace,
@@ -9,9 +9,9 @@
 //
 // Usage:
 //
-//	gk-net [flags]                 run on the router
-//	gk-net inspect [flags] FILE    classify a pcap file offline
-//	gk-net protocols [QUERY...]    search the protocols nDPI can detect
+//	gk-fltr [flags]                 run on the router
+//	gk-fltr inspect [flags] FILE    classify a pcap file offline
+//	gk-fltr protocols [QUERY...]    search the protocols nDPI can detect
 package main
 
 import (
@@ -30,13 +30,13 @@ import (
 	"time"
 	_ "time/tzdata" // gokrazy has no zoneinfo files; needed for -timezone
 
-	"github.com/ascension-association/gk-net/internal/blocklog"
-	"github.com/ascension-association/gk-net/internal/engine"
-	"github.com/ascension-association/gk-net/internal/firewall"
-	"github.com/ascension-association/gk-net/internal/ndpi"
-	"github.com/ascension-association/gk-net/internal/netpkt"
-	"github.com/ascension-association/gk-net/internal/policy"
-	"github.com/ascension-association/gk-net/internal/quota"
+	"github.com/ascension-association/gk-fltr/internal/blocklog"
+	"github.com/ascension-association/gk-fltr/internal/engine"
+	"github.com/ascension-association/gk-fltr/internal/firewall"
+	"github.com/ascension-association/gk-fltr/internal/ndpi"
+	"github.com/ascension-association/gk-fltr/internal/netpkt"
+	"github.com/ascension-association/gk-fltr/internal/policy"
+	"github.com/ascension-association/gk-fltr/internal/quota"
 )
 
 // listFlag collects repeated flag values; comma-separated values are split.
@@ -69,7 +69,7 @@ func (c *common) register(fs *flag.FlagSet) {
 	fs.Var(&c.ja4s, "ja4", "block sources with this JA4 fingerprint; '*' wildcards allowed (repeatable)")
 	fs.StringVar(&c.rulesFile, "rules", "", "file with one rule per line: \"ip|mac|ja4 <value> [user=NAME] [allow=DURATION]\"; reloaded when it changes")
 	fs.DurationVar(&c.allowance, "allowance", 0, "daily allowance for rules and users without allow= (0: always blocked)")
-	fs.StringVar(&c.protos, "protocols", "YouTube,YouTubeUpload,YouTubeKids", "comma-separated nDPI protocol names, or category:NAME for a whole category, to block (see: gk-net protocols)")
+	fs.StringVar(&c.protos, "protocols", "YouTube,YouTubeUpload,YouTubeKids", "comma-separated nDPI protocol names, or category:NAME for a whole category, to block (see: gk-fltr protocols)")
 	fs.StringVar(&c.license, "ndpi-license", "not-for-profit", "nDPI license mode: not-for-profit, for-profit-lgpl or for-profit-dual")
 	fs.IntVar(&c.maxPackets, "max-packets", 24, "packets per flow to inspect before giving up")
 	fs.BoolVar(&c.verbose, "v", false, "log every classified flow, not just blocked ones")
@@ -196,28 +196,28 @@ func main() {
 }
 
 func run(args []string) error {
-	fs := flag.NewFlagSet("gk-net", flag.ExitOnError)
+	fs := flag.NewFlagSet("gk-fltr", flag.ExitOnError)
 	var c common
 	c.register(fs)
 	var (
-		mode         = fs.String("mode", "auto", "how packets reach gk-net: queue (inline, needs CONFIG_NFT_QUEUE), log (passive, needs CONFIG_NETFILTER_NETLINK_LOG) or auto (queue; falls back to log only with -fail-open)")
-		failOpen     = fs.Bool("fail-open", false, "let traffic through unfiltered when gk-net is down, overloaded or cannot track a flow (default: fail closed, drop new connections' packets)")
-		blockLog     = fs.String("block-log", "", "append blocked flows as JSON lines to this file, e.g. /perm/gk-net/blocks.jsonl")
+		mode         = fs.String("mode", "auto", "how packets reach gk-fltr: queue (inline, needs CONFIG_NFT_QUEUE), log (passive, needs CONFIG_NETFILTER_NETLINK_LOG) or auto (queue; falls back to log only with -fail-open)")
+		failOpen     = fs.Bool("fail-open", false, "let traffic through unfiltered when gk-fltr is down, overloaded or cannot track a flow (default: fail closed, drop new connections' packets)")
+		blockLog     = fs.String("block-log", "", "append blocked flows as JSON lines to this file, e.g. /perm/gk-fltr/blocks.jsonl")
 		blockLogMax  = fs.Int64("block-log-max-size", 10<<20, "rotate the block log to FILE.1 when it exceeds this many bytes (0: no limit)")
-		table        = fs.String("table", "gk_net", "nftables table name (family inet)")
+		table        = fs.String("table", "gk_fltr", "nftables table name (family inet)")
 		priority     = fs.Int("priority", -10, "forward chain priority")
 		queueNum     = fs.Uint("queue-num", 4269, "NFQUEUE numbers used in queue mode (this one and the next)")
 		group        = fs.Uint("nflog-group", 4269, "NFLOG group used in log mode")
 		blockTimeout = fs.Duration("block-timeout", 10*time.Minute, "how long a blocked connection stays blocked")
 		noReset      = fs.Bool("no-reset", false, "do not send TCP RSTs or ICMP errors to blocked clients")
-		statePath    = fs.String("state", "", "file where allowance use is kept across restarts, e.g. /perm/gk-net/state.json")
+		statePath    = fs.String("state", "", "file where allowance use is kept across restarts, e.g. /perm/gk-fltr/state.json")
 		resetTime    = fs.String("reset-time", "00:00", "local time of day (HH:MM) when daily allowances reset")
 		timezone     = fs.String("timezone", "Local", "timezone for -reset-time, e.g. America/Denver (gokrazy's Local is UTC unless TZ is set)")
 		activeBytes  = fs.Uint64("active-bytes", 64<<10, "bytes a user's allowed connections must move in a usage interval for it to count as active")
 		usageEvery   = fs.Duration("usage-interval", time.Minute, "how often allowance use is measured; each active interval is charged in full")
 	)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "usage: gk-net [flags]\n       gk-net inspect [flags] FILE.pcap\n       gk-net protocols [flags] [QUERY...]\n\nflags:\n")
+		fmt.Fprintf(fs.Output(), "usage: gk-fltr [flags]\n       gk-fltr inspect [flags] FILE.pcap\n       gk-fltr protocols [flags] [QUERY...]\n\nflags:\n")
 		fs.PrintDefaults()
 	}
 	fs.Parse(args)
@@ -362,7 +362,7 @@ func run(args []string) error {
 	var capture io.Closer
 	if *mode == "log" {
 		if !*failOpen {
-			log.Printf("warning: log mode is passive and cannot fail closed; traffic is unfiltered while gk-net is down")
+			log.Printf("warning: log mode is passive and cannot fail closed; traffic is unfiltered while gk-fltr is down")
 		}
 		fw, capture, err = startCapture(ctx, firewall.ModeLog, opts, eng)
 	} else {
@@ -395,7 +395,7 @@ func run(args []string) error {
 	if *failOpen || fw.Mode() == firewall.ModeLog {
 		failure = "fail-open"
 	}
-	log.Printf("gk-net running in %s mode, %s: %s; blocking %s", mname, failure, pol, c.protos)
+	log.Printf("gk-fltr running in %s mode, %s: %s; blocking %s", mname, failure, pol, c.protos)
 
 	// Metered flows from before a restart are still open; keep counting them.
 	for _, f := range tracker.Flows() {

@@ -1,4 +1,4 @@
-// Package firewall installs gk-net's nftables table and blocks flows in it.
+// Package firewall installs gk-fltr's nftables table and blocks flows in it.
 //
 // The table is self-contained and does not touch other tables:
 //
@@ -28,12 +28,12 @@
 //			meta l4proto . ip saddr . th sport . ip daddr . th dport @allow4 accept
 //			meta l4proto . ip daddr . th dport . ip saddr . th sport @allow4 accept
 //			... (same for ipv6 / @allow6)
-//			# ... and the first packets of every other connection wait for gk-net.
+//			# ... and the first packets of every other connection wait for gk-fltr.
 //			# With FailOpen the queue rules also get "bypass".
 //			ct packets < <n> ct direction original queue num <q>
 //			ct packets < <n> ct direction reply    queue num <q+1>
 //
-//			# Log mode: the first packets are copied to gk-net instead.
+//			# Log mode: the first packets are copied to gk-fltr instead.
 //			ct packets < <n> ct direction original log group <g> prefix "o"
 //			ct packets < <n> ct direction reply    log group <g> prefix "r"
 //		}
@@ -59,14 +59,14 @@ const (
 	PrefixReply    = "r"
 )
 
-// Mode selects how packets reach gk-net.
+// Mode selects how packets reach gk-fltr.
 type Mode int
 
 const (
 	// ModeQueue holds the first packets of each connection in NFQUEUE until
-	// gk-net issues a verdict (needs CONFIG_NFT_QUEUE).
+	// gk-fltr issues a verdict (needs CONFIG_NFT_QUEUE).
 	ModeQueue Mode = iota
-	// ModeLog copies the first packets of each connection to gk-net via
+	// ModeLog copies the first packets of each connection to gk-fltr via
 	// NFLOG and lets them pass (needs CONFIG_NETFILTER_NETLINK_LOG).
 	ModeLog
 )
@@ -82,19 +82,19 @@ func (m Mode) String() string {
 type Options struct {
 	Table        string        // table name (family inet)
 	Priority     int32         // forward chain priority
-	Mode         Mode          // how packets reach gk-net
+	Mode         Mode          // how packets reach gk-fltr
 	Queue        uint16        // queue mode: original direction uses Queue, reply Queue+1
 	Group        uint16        // log mode: NFLOG group
-	Packets      uint64        // hand packets to gk-net while ct packets < Packets
+	Packets      uint64        // hand packets to gk-fltr while ct packets < Packets
 	BlockTimeout time.Duration // how long a blocked flow stays in the block set
 	AllowTimeout time.Duration // queue mode: how long an allowed flow skips the queue
 	MeterTimeout time.Duration // how long a metered flow stays in the meter set (default 24h)
-	// FailOpen makes the queue rules accept packets while no gk-net is
+	// FailOpen makes the queue rules accept packets while no gk-fltr is
 	// listening ("bypass"). Otherwise they are dropped (fail closed).
 	FailOpen bool
 }
 
-// Firewall is an installed gk-net table.
+// Firewall is an installed gk-fltr table.
 type Firewall struct {
 	mu           sync.Mutex
 	opts         Options
@@ -469,5 +469,5 @@ func (fw *Firewall) Close() error {
 	return fw.conn.Flush()
 }
 
-// Mode reports how packets reach gk-net.
+// Mode reports how packets reach gk-fltr.
 func (fw *Firewall) Mode() Mode { return fw.opts.Mode }

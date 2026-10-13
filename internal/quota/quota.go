@@ -1,6 +1,6 @@
 // Package quota tracks daily allowances of "active minutes".
 //
-// Flows admitted under an allowance are metered: gk-net puts them in an
+// Flows admitted under an allowance are metered: gk-fltr puts them in an
 // nftables set with a byte counter per flow, and passes the counters to Tick
 // at a fixed interval. Each interval in which a group's flows moved at least
 // ActiveBytes counts as one interval of use. Once a group's use reaches its

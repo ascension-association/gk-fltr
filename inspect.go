@@ -11,19 +11,19 @@ import (
 	"os"
 	"time"
 
-	"github.com/ascension-association/gk-net/internal/engine"
-	"github.com/ascension-association/gk-net/internal/policy"
+	"github.com/ascension-association/gk-fltr/internal/engine"
+	"github.com/ascension-association/gk-fltr/internal/policy"
 )
 
 // inspect classifies the flows in a pcap file and prints the decision the
 // router would make for each, which is handy for finding JA4 fingerprints
 // and testing rules.
 func inspect(args []string) error {
-	fs := flag.NewFlagSet("gk-net inspect", flag.ExitOnError)
+	fs := flag.NewFlagSet("gk-fltr inspect", flag.ExitOnError)
 	var c common
 	c.register(fs)
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "usage: gk-net inspect [flags] FILE.pcap\n\nflags:\n")
+		fmt.Fprintf(fs.Output(), "usage: gk-fltr inspect [flags] FILE.pcap\n\nflags:\n")
 		fs.PrintDefaults()
 	}
 	fs.Parse(args)

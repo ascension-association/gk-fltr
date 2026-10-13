@@ -8,7 +8,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/ascension-association/gk-net/internal/netpkt"
+	"github.com/ascension-association/gk-fltr/internal/netpkt"
 )
 
 // Injector sends packets through raw sockets, so that a client whose flow
@@ -41,7 +41,7 @@ func (in *Injector) Reset(from, to netip.AddrPort, seq uint32) error {
 // ACK (RFC 793, RFC 5961). Once a flow is in the block set, that answer hits
 // the "reject with tcp reset" rule and the kernel resets "to" with exactly
 // the sequence number it expects. This ends established connections for
-// which gk-net has no current packet to build a RST from.
+// which gk-fltr has no current packet to build a RST from.
 func (in *Injector) Nudge(from, to netip.AddrPort) error {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
