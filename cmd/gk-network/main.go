@@ -39,7 +39,7 @@ func main() {
 	// Default to Safe Surfer's family-filtering resolvers (safesurfer.io).
 	upstream1 := flag.String("upstream", "4.150.168.57", "primary upstream DNS server (IPv4, :53 assumed if no port)")
 	upstream2 := flag.String("upstream2", "104.197.28.121", "secondary/failover upstream DNS server (IPv4, :53 assumed if no port)")
-	blocklistsCSV := flag.String("blocklists", "", "comma-separated blocklist URLs for DNS sinkholing (default: OISD Small + OISD NSFW)")
+	blocklistsCSV := flag.String("blocklists", "", "comma-separated blocklist URLs for DNS sinkholing (default: OISD Small + OISD NSFW + HaGeZi Anti-Piracy)")
 	blockCSV := flag.String("block", "", "comma-separated domains to always sinkhole (added to the built-in defaults)")
 	allowCSV := flag.String("allow", "", "comma-separated domains to never sinkhole (allowlist; added to the built-in defaults)")
 	blockNFT := flag.Bool("block-nft", false, "install nftables named sets (blocked_v4/blocked_v6) and a forward-path drop rule")
@@ -48,7 +48,8 @@ func main() {
 	blockCountries := flag.Bool("block-countries", true, "block forwarded traffic to IP ranges of the full/partial U.S. entry-suspension countries (CRS IN12631; uses nftables)")
 	allowIPv6 := flag.Bool("ipv6", false, "allow IPv6 (disabled by default, since it can bypass IPv4 filtering)")
 	allowECH := flag.Bool("ech", false, "allow TLS 1.3 Encrypted Client Hello (blocked by default; it hides SNI from filtering)")
-	blockEncDNS := flag.Bool("block-encrypted-dns", true, "block DoT/DoQ (port 853) and known DoH endpoints so clients can't bypass filtering (uses nftables)")
+	blockEncDNS := flag.Bool("block-encrypted-dns", true, "block DoT/DoQ (port 853), known DoH endpoints, and Tor relay ports (9001/9030) so clients can't bypass filtering (uses nftables)")
+	blockVPN := flag.Bool("block-vpn", true, "block VPNs: WireGuard handshakes on any UDP port, default VPN/mesh protocol ports, VPN provider/tool domains, and commercial VPN server IP ranges (uses nftables)")
 	redirectDNS := flag.Bool("redirect-dns", true, "transparently redirect steered clients' port-53 DNS to this resolver (requires the resolver on :53; uses nftables)")
 	refresh := flag.Duration("refresh", 12*time.Hour, "how often to re-fetch domain and IP blocklists (0 disables)")
 	flag.Parse()
@@ -130,7 +131,8 @@ func main() {
 	doRedirectDNS := *redirectDNS && dnsOn53
 
 	// CIDR range lists: -ip-blocklists (the defaults when empty, nothing when
-	// "none"), plus the suspended-country ranges unless -block-countries=false.
+	// "none"), plus the VPN server ranges and suspended-country ranges unless
+	// -block-vpn=false / -block-countries=false.
 	var ipURLs []string // kept for periodic refresh
 	switch v := strings.TrimSpace(*ipBlocklistsCSV); {
 	case strings.EqualFold(v, "none"):
@@ -143,11 +145,14 @@ func main() {
 			}
 		}
 	}
+	if *blockVPN {
+		ipURLs = append(ipURLs, filter.VPNIPBlocklists...)
+	}
 	if *blockCountries {
 		ipURLs = append(ipURLs, filter.CountryBlocklistURLs(filter.SuspendedCountries, *allowIPv6)...)
 	}
 	ipBlockEnabled := len(ipURLs) > 0
-	needNFT := *blockNFT || *blockIPsCSV != "" || *blockEncDNS || ipBlockEnabled || doRedirectDNS
+	needNFT := *blockNFT || *blockIPsCSV != "" || *blockEncDNS || *blockVPN || ipBlockEnabled || doRedirectDNS
 	var blocker *filter.IPBlocker
 	if needNFT {
 		var err error
@@ -185,6 +190,14 @@ func main() {
 			if err := blocker.BlockDoH(filter.DefaultDoHEndpoints); err != nil {
 				log.Fatalf("nft block DoH: %v", err)
 			}
+			if err := blocker.BlockTor(); err != nil {
+				log.Fatalf("nft block Tor: %v", err)
+			}
+		}
+		if *blockVPN {
+			if err := blocker.BlockVPN(); err != nil {
+				log.Fatalf("nft block VPN: %v", err)
+			}
 		}
 		if doRedirectDNS {
 			if err := blocker.RedirectDNS(); err != nil {
@@ -212,7 +225,7 @@ func main() {
 		ss.SetBlockIPv6(!*allowIPv6)
 		ss.SetAllowECH(*allowECH)
 
-		// DNS domain blocklist (OISD Small + NSFW by default).
+		// DNS domain blocklist (OISD Small + NSFW + HaGeZi Anti-Piracy by default).
 		for _, u := range strings.Split(*blocklistsCSV, ",") {
 			if u = strings.TrimSpace(u); u != "" {
 				dnsURLs = append(dnsURLs, u)
@@ -228,8 +241,17 @@ func main() {
 		}
 		if *blockEncDNS {
 			// Sinkhole bypass bootstrap domains (Firefox DoH canary, Brave Tor,
-			// Oblivious DoH).
+			// Oblivious DoH, Tor Project).
 			extra = append(extra, filter.DefaultBypassDomains...)
+		}
+		if *blockVPN {
+			// VPN provider/tool domains: the bypass list on top of the
+			// configured (or default) domain lists, plus individual domains.
+			if len(dnsURLs) == 0 {
+				dnsURLs = append(dnsURLs, filter.DefaultBlocklists...)
+			}
+			dnsURLs = append(dnsURLs, filter.VPNDomainBlocklists...)
+			extra = append(extra, filter.VPNDomains...)
 		}
 		bl = filter.NewBlocklist()
 		// Allowlist (never sinkholed): built-in defaults plus -allow entries.
@@ -241,7 +263,7 @@ func main() {
 				bl.Allow(d)
 			}
 		}
-		bl.LoadDefaults(dnsURLs) // uses OISD defaults when dnsURLs is empty
+		bl.LoadDefaults(dnsURLs) // uses defaults when dnsURLs is empty
 		for _, d := range extra {
 			bl.Add(d)
 		}

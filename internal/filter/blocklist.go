@@ -12,21 +12,25 @@ import (
 )
 
 // DefaultBlocklists are the lists loaded when none are specified: OISD Small
-// (ads/trackers/malware) and OISD NSFW (adult content). Both are served
-// in ABP syntax at these hosts. See https://oisd.nl/.
+// (ads/trackers/malware) and OISD NSFW (adult content), both served in ABP
+// syntax (see https://oisd.nl/), and HaGeZi Anti-Piracy (piracy sites, as
+// plain domains; see https://github.com/hagezi/dns-blocklists).
 var DefaultBlocklists = []string{
 	"https://small.oisd.nl/",
 	"https://nsfw.oisd.nl/",
+	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/anti.piracy-onlydomains.txt",
 }
 
 // DefaultBypassDomains are individual domains sinkholed when bypass /
 // encrypted-DNS blocking is enabled: the Firefox DoH canary (resolving it to
-// NXDOMAIN keeps Firefox's auto-DoH off), Brave's Tor bootstrap host, and
-// Cloudflare's Oblivious DoH endpoint.
+// NXDOMAIN keeps Firefox's auto-DoH off), Brave's Tor bootstrap host,
+// Cloudflare's Oblivious DoH endpoint, and the Tor Project site (Tor Browser
+// downloads and bridge distribution).
 var DefaultBypassDomains = []string{
 	"use-application-dns.net",
 	"tor.bravesoftware.com",
 	"odoh.cloudflare-dns.com",
+	"torproject.org",
 }
 
 // DefaultBlockDomains are individual domains always sinkholed, in addition to

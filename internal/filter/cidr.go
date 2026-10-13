@@ -14,15 +14,20 @@ import (
 
 // DefaultIPBlocklists are the CIDR/IP range lists loaded into the nftables
 // interval sets when none are specified. These block known DoH servers (which
-// would otherwise bypass the DNS/SNI filtering) and known malicious sources.
+// would otherwise bypass the DNS/SNI filtering), known malicious sources,
+// Tor relays, and open SSL proxies.
 // CIDR (.netset), single-IP (.ipset / .txt), and gzipped forms are all
 // handled.
 var DefaultIPBlocklists = []string{
 	"https://raw.githubusercontent.com/dibdot/DoH-IP-blocklists/master/doh-ipv4.txt",
 	"https://iplists.firehol.org/files/firehol_level1.netset",
 	"https://iplists.firehol.org/files/firehol_level2.netset",
-	"https://iplists.firehol.org/files/firehol_level3.netset",
 	"https://iplists.firehol.org/files/iblocklist_pedophiles.netset",
+	"https://iplists.firehol.org/files/iblocklist_onion_router.netset",
+	"https://iplists.firehol.org/files/et_tor.ipset",
+	"https://iplists.firehol.org/files/dm_tor.ipset",
+	"https://iplists.firehol.org/files/tor_exits.ipset",
+	"https://iplists.firehol.org/files/sslproxies.ipset",
 }
 
 // reservedV4 and reservedV6 are address ranges that must never be blocked:

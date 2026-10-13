@@ -212,6 +212,27 @@ func (b *IPBlocker) BlockDoT() error {
 	return nil
 }
 
+// TorPorts are the default Tor relay ORPort (9001) and DirPort (9030).
+var TorPorts = []uint16{9001, 9030}
+
+// BlockTor drops forwarded TCP to the default Tor relay ports, so clients
+// can't reach the Tor network through relays on their standard ports.
+func (b *IPBlocker) BlockTor() error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, p := range TorPorts {
+		b.conn.AddRule(&nftables.Rule{
+			Table: b.table, Chain: b.chain,
+			Exprs: append(matchL4Port(protoTCP, p), &expr.Verdict{Kind: expr.VerdictDrop}),
+		})
+	}
+	if err := b.conn.Flush(); err != nil {
+		return fmt.Errorf("block Tor ports %v: %w", TorPorts, err)
+	}
+	log.Printf("nft: Tor ports %v dropped", TorPorts)
+	return nil
+}
+
 // BlockDoH creates named sets doh_v4/doh_v6 of DoH endpoint IPs and drops
 // forwarded port-443 traffic to them. Other HTTPS traffic is unaffected.
 func (b *IPBlocker) BlockDoH(ips []netip.Addr) error {
