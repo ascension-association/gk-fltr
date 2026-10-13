@@ -45,6 +45,7 @@ func main() {
 	blockNFT := flag.Bool("block-nft", false, "install nftables named sets (blocked_v4/blocked_v6) and a forward-path drop rule")
 	blockIPsCSV := flag.String("block-ips", "", "comma-separated IPs to seed into the nftables block sets (implies -block-nft)")
 	ipBlocklistsCSV := flag.String("ip-blocklists", "", "comma-separated CIDR blocklist URLs (gz ok) for nftables range blocking (default: DoH + malicious-source lists; \"none\" disables)")
+	blockCountries := flag.Bool("block-countries", true, "block forwarded traffic to IP ranges of the full/partial U.S. entry-suspension countries (CRS IN12631; uses nftables)")
 	allowIPv6 := flag.Bool("ipv6", false, "allow IPv6 (disabled by default, since it can bypass IPv4 filtering)")
 	allowECH := flag.Bool("ech", false, "allow TLS 1.3 Encrypted Client Hello (blocked by default; it hides SNI from filtering)")
 	blockEncDNS := flag.Bool("block-encrypted-dns", true, "block DoT/DoQ (port 853) and known DoH endpoints so clients can't bypass filtering (uses nftables)")
@@ -128,10 +129,26 @@ func main() {
 	}
 	doRedirectDNS := *redirectDNS && dnsOn53
 
-	ipBlockEnabled := strings.ToLower(strings.TrimSpace(*ipBlocklistsCSV)) != "none"
+	// CIDR range lists: -ip-blocklists (the defaults when empty, nothing when
+	// "none"), plus the suspended-country ranges unless -block-countries=false.
+	var ipURLs []string // kept for periodic refresh
+	switch v := strings.TrimSpace(*ipBlocklistsCSV); {
+	case strings.EqualFold(v, "none"):
+	case v == "":
+		ipURLs = append(ipURLs, filter.DefaultIPBlocklists...)
+	default:
+		for _, u := range strings.Split(v, ",") {
+			if u = strings.TrimSpace(u); u != "" {
+				ipURLs = append(ipURLs, u)
+			}
+		}
+	}
+	if *blockCountries {
+		ipURLs = append(ipURLs, filter.CountryBlocklistURLs(filter.SuspendedCountries, *allowIPv6)...)
+	}
+	ipBlockEnabled := len(ipURLs) > 0
 	needNFT := *blockNFT || *blockIPsCSV != "" || *blockEncDNS || ipBlockEnabled || doRedirectDNS
 	var blocker *filter.IPBlocker
-	var ipURLs []string // kept for periodic refresh
 	if needNFT {
 		var err error
 		blocker, err = filter.NewIPBlocker("gknetwork")
@@ -175,12 +192,7 @@ func main() {
 			}
 		}
 		if ipBlockEnabled {
-			for _, u := range strings.Split(*ipBlocklistsCSV, ",") {
-				if u = strings.TrimSpace(u); u != "" {
-					ipURLs = append(ipURLs, u)
-				}
-			}
-			prefixes := filter.LoadIPBlocklists(ipURLs) // defaults when empty
+			prefixes := filter.LoadIPBlocklists(ipURLs)
 			if len(prefixes) > 0 {
 				if err := blocker.BlockCIDRs(prefixes); err != nil {
 					log.Fatalf("nft block CIDRs: %v", err)

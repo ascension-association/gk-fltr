@@ -20,6 +20,9 @@ import (
 var DefaultIPBlocklists = []string{
 	"https://raw.githubusercontent.com/dibdot/DoH-IP-blocklists/master/doh-ipv4.txt",
 	"https://iplists.firehol.org/files/firehol_level1.netset",
+	"https://iplists.firehol.org/files/firehol_level2.netset",
+	"https://iplists.firehol.org/files/firehol_level3.netset",
+	"https://iplists.firehol.org/files/iblocklist_pedophiles.netset",
 }
 
 // reservedV4 and reservedV6 are address ranges that must never be blocked:

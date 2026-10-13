@@ -33,13 +33,14 @@ Run `gk-network -help` to list all flags and their defaults.
 - `-block-nft`  install nftables named sets + forward-path drop rule
 - `-block-ips`  comma-separated IPs to seed into the block sets (implies `-block-nft`)
 - `-ip-blocklists` CIDR range blocklist URLs, gz ok (default: DoH + malicious-source lists; `none` disables)
+- `-block-countries` block forwarded traffic to IP ranges of the [full/partial U.S. entry-suspension countries](https://www.congress.gov/crs-product/IN12631) (default on; `-block-countries=false` disables; uses nftables)
 - `-ipv6`       allow IPv6 (disabled by default)
 - `-ech`        allow TLS 1.3 Encrypted Client Hello (blocked by default)
 - `-block-encrypted-dns` block DoT/DoQ + known DoH endpoints (default on; uses nftables)
 - `-redirect-dns` transparently redirect clients' port-53 DNS to this resolver (default on; needs resolver on :53)
 - `-refresh`    how often to re-fetch domain + IP blocklists (default `12h`; `0` disables)
 
-Note: DNS filtering by [Safe Surfer](https://safesurfer.io); content block by [oisd](https://oisd.nl/); malware block by [FireHOL](https://iplists.firehol.org/?ipset=firehol_level1)
+Note: DNS filtering by [Safe Surfer](https://safesurfer.io); content block by [oisd](https://oisd.nl/); malware and pedophile IP block by [FireHOL](https://iplists.firehol.org/?ipset=firehol_level1) ([level2](https://iplists.firehol.org/?ipset=firehol_level2), [level3](https://iplists.firehol.org/?ipset=firehol_level3)) / [iBlocklist](https://iplists.firehol.org/?ipset=iblocklist_pedophiles); country IP ranges by [ipdeny](https://www.ipdeny.com/)
 
 ### Safe-Search
 
