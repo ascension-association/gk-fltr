@@ -1,8 +1,11 @@
 package filter
 
-import "strings"
-
-import "testing"
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
 
 func TestParseBlocklistLine(t *testing.T) {
 	cases := map[string]string{
@@ -20,11 +23,31 @@ func TestParseBlocklistLine(t *testing.T) {
 		"||example.com/path":    "",
 		"localhost":             "", // no dot
 		"  ||spaced.example^  ": "spaced.example",
+		"bestgore.com   #Gore":  "bestgore.com",
+		"lolz.guru\t#Forum":     "lolz.guru",
+		"example.com##.ad":      "", // ABP cosmetic rule
 	}
 	for in, want := range cases {
 		if got := parseBlocklistLine(in); got != want {
 			t.Errorf("parseBlocklistLine(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestForceBlock(t *testing.T) {
+	b := NewBlocklist()
+	b.Allow("comodo.com")
+	b.ForceBlock("easy-vpn.comodo.com")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("easy-vpn.comodo.com\n"))
+	}))
+	defer srv.Close()
+	b.Reload([]string{srv.URL}, nil, nil, []string{"comodo.com"}) // force-blocks survive a reload
+	if !b.Blocked("easy-vpn.comodo.com.") || !b.Blocked("x.easy-vpn.comodo.com") {
+		t.Error("force-blocked domain not blocked despite allowlist")
+	}
+	if b.Blocked("www.comodo.com") {
+		t.Error("allowlisted domain blocked")
 	}
 }
 

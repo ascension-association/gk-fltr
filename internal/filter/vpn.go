@@ -25,9 +25,13 @@ import (
 // VPNDomainBlocklists are DNS blocklists loaded alongside the domain lists
 // when VPN blocking is enabled: HaGeZi's Encrypted DNS/VPN/Tor/Proxy Bypass
 // list (commercial VPNs, proxies, iCloud Private Relay, Psiphon, Lantern,
-// Outline, ZeroTier, and more). See https://github.com/hagezi/dns-blocklists.
+// Outline, ZeroTier, and more; see https://github.com/hagezi/dns-blocklists),
+// plus ShadowWhisperer's Tunnels and Wild_Tunnel VPN/proxy lists (see
+// https://github.com/ShadowWhisperer/BlockLists).
 var VPNDomainBlocklists = []string{
 	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/doh-vpn-proxy-bypass-onlydomains.txt",
+	"https://raw.githubusercontent.com/ShadowWhisperer/BlockLists/master/Lists/Tunnels",
+	"https://raw.githubusercontent.com/ShadowWhisperer/BlockLists/master/Lists/Wild_Tunnel",
 }
 
 // VPNDomains are sinkholed when VPN blocking is enabled, in addition to

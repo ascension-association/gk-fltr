@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"time"
@@ -19,8 +20,10 @@ import (
 // https://github.com/hagezi/dns-blocklists), StevenBlack's fakenews-only
 // hosts file (see https://github.com/StevenBlack/hosts), HaGeZi's Native
 // Tracker lists (built-in telemetry from device vendors, apps, and OSes),
-// HaGeZi Pop-Up Ads (pop-up, pop-under, and malicious ad domains), and HaGeZi
-// Fake (fake stores, scams, and fraud sites).
+// HaGeZi Pop-Up Ads (pop-up, pop-under, and malicious ad domains), HaGeZi
+// Fake (fake stores, scams, and fraud sites), and ShadowWhisperer's Gambling,
+// Malware, Remote (remote-control tools), Risk, Scam, Shock (gore), and Typo
+// (typosquatting) lists (see https://github.com/ShadowWhisperer/BlockLists).
 var DefaultBlocklists = []string{
 	"https://small.oisd.nl/",
 	"https://nsfw.oisd.nl/",
@@ -41,6 +44,13 @@ var DefaultBlocklists = []string{
 	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.xiaomi-onlydomains.txt",
 	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/popupads-onlydomains.txt",
 	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/fake-onlydomains.txt",
+	"https://raw.githubusercontent.com/ShadowWhisperer/BlockLists/master/Lists/Gambling",
+	"https://raw.githubusercontent.com/ShadowWhisperer/BlockLists/master/Lists/Malware",
+	"https://raw.githubusercontent.com/ShadowWhisperer/BlockLists/master/Lists/Remote",
+	"https://raw.githubusercontent.com/ShadowWhisperer/BlockLists/master/Lists/Risk",
+	"https://raw.githubusercontent.com/ShadowWhisperer/BlockLists/master/Lists/Scam",
+	"https://raw.githubusercontent.com/ShadowWhisperer/BlockLists/master/Lists/Shock",
+	"https://raw.githubusercontent.com/ShadowWhisperer/BlockLists/master/Lists/Typo",
 }
 
 // DefaultBypassDomains are individual domains sinkholed when bypass /
@@ -59,12 +69,107 @@ var DefaultBypassDomains = []string{
 // the loaded lists.
 var DefaultBlockDomains = []string{
 	"bad-example.com",
+	"badexample.com",
+
+	// Prediction markets and betting exchanges the gambling lists miss.
+	"polymarket.us", // Polymarket's US site; polymarket.com is in the gambling lists
+	"limitless.exchange",
+	"myriad.markets",
+	"hedgehog.markets",
+	"zeitgeist.pm",
+	"augur.net",
+	"insight.markets",
+	"sporttrade.app",
+	"forecastex.com",   // Interactive Brokers' event contracts
+	"manifold.markets", // play money
+	"metaculus.com",    // forecasting
+}
+
+// DefaultForceBlockDomains are always sinkholed, even when an allowlist covers
+// them: blocked subdomains of domains the loaded allowlists allow whole.
+var DefaultForceBlockDomains = []string{
+	"easy-vpn.comodo.com", // Comodo VPN; comodo.com is in BadBlock's certs whitelist
+
+	// VPN/proxy buckets in S3 regions allowed whole by ShadowWhisperer's Whitelist.
+	"cg-extension.s3-eu-west-1.amazonaws.com", // CyberGhost browser extension
+	"dsl-app.s3.us-east-2.amazonaws.com",
+	"innov-windows.s3.us-east-2.amazonaws.com",
+	"tokna.s3-us-west-1.amazonaws.com",
 }
 
 // DefaultAllowDomains are never sinkholed even if a loaded list contains them.
 // zzztest.oisd.nl is OISD's test entry (present in their lists on purpose).
+// azure-devices.net (Azure IoT Hub, used by smart-home devices) and
+// amazonworkspaces.com (Amazon WorkSpaces) are in ShadowWhisperer's Remote
+// list but are not remote-control tools. dnsforfamily.com (a family-filtering
+// DNS provider) is in HaGeZi's encrypted-DNS bypass list, as is opendns.com;
+// only OpenDNS FamilyShield is allowed, since the rest of opendns.com includes
+// unfiltered resolvers. Likewise only Yandex DNS Family mode is allowed out of
+// dns.yandex.net, only AdGuard DNS Family Protection out of adguard-dns.com,
+// and only Control D Family Friendly out of freedns.controld.com (its DoH URL
+// freedns.controld.com/family shares a hostname with the unfiltered resolver,
+// so only the DoT hostname can be allowed). Safe Surfer (the default upstream)
+// runs only family-filtering resolvers, so its domains are allowed in full.
+// For CleanBrowsing only the Family filter's DoT hostname is allowed: its DoH
+// host doh.cleanbrowsing.org also serves the Security filter, which does not
+// block adult content. neverssl.com, msftconnecttest.com, and
+// captive.apple.com are connectivity / captive-portal checks that devices rely
+// on to detect a working connection.
 var DefaultAllowDomains = []string{
 	"zzztest.oisd.nl",
+	"azure-devices.net",
+	"amazonworkspaces.com",
+	"dnsforfamily.com",
+	"familyshield.opendns.com",
+	"family.dot.dns.yandex.net",
+	"family.adguard-dns.com",
+	"family.freedns.controld.com",
+	"safesurfer.io",
+	"safesurfer.co.nz",
+	"family-filter-dns.cleanbrowsing.org",
+	"neverssl.com",
+	"msftconnecttest.com",
+	"captive.apple.com",
+}
+
+// DefaultAllowlists are allowlist URLs loaded when none are specified:
+// ShadowWhisperer's Whitelist of domains that blocklists commonly catch but
+// whose blocking breaks apps, devices, and sites (see
+// https://github.com/ShadowWhisperer/BlockLists), and BadBlock's captive
+// portal, certificate (OCSP/CRL), time, push notification, safe browsing, and
+// captcha whitelists (see https://github.com/celenityy/BadBlock). BadBlock's
+// combined whitelist is deliberately not used: its misc/ISP entries (e.g.
+// free.fr, s3.amazonaws.com, adguard-vpn.com) reopen porn and VPN/Tor/DoH
+// bypasses.
+var DefaultAllowlists = []string{
+	"https://raw.githubusercontent.com/ShadowWhisperer/BlockLists/master/Whitelists/Whitelist",
+	"https://raw.githubusercontent.com/celenityy/BadBlock/pages/wildcards-no-star/captive_whitelist.txt",
+	"https://raw.githubusercontent.com/celenityy/BadBlock/pages/wildcards-no-star/certs_whitelist.txt",
+	"https://raw.githubusercontent.com/celenityy/BadBlock/pages/wildcards-no-star/time_whitelist.txt",
+	"https://raw.githubusercontent.com/celenityy/BadBlock/pages/wildcards-no-star/push_whitelist.txt",
+	"https://raw.githubusercontent.com/celenityy/BadBlock/pages/wildcards-no-star/safe-browsing_whitelist.txt",
+	"https://raw.githubusercontent.com/celenityy/BadBlock/pages/wildcards-no-star/captcha_whitelist.txt",
+}
+
+// DefaultAllowIPs are never blocked by the IP range lists even if a loaded list
+// contains them: the family-filtering resolvers of OpenDNS FamilyShield, Yandex
+// DNS Family, AdGuard DNS Family Protection, UltraDNS Public Family Secure,
+// DNS for Family, Control D Family Friendly, Safe Surfer, and CleanBrowsing
+// Family filter.
+var DefaultAllowIPs = []netip.Addr{
+	netip.MustParseAddr("208.67.222.123"), netip.MustParseAddr("208.67.220.123"), // OpenDNS FamilyShield
+	netip.MustParseAddr("77.88.8.7"), netip.MustParseAddr("77.88.8.3"), // Yandex DNS Family
+	netip.MustParseAddr("2a02:6b8::feed:a11"), netip.MustParseAddr("2a02:6b8:0:1::feed:a11"), // Yandex DNS Family v6
+	netip.MustParseAddr("156.154.70.3"), netip.MustParseAddr("156.154.71.3"), // UltraDNS Public Family Secure
+	netip.MustParseAddr("2610:a1:1018::3"), netip.MustParseAddr("2610:a1:1019::3"), // UltraDNS Public Family Secure v6
+	netip.MustParseAddr("94.140.14.15"), netip.MustParseAddr("94.140.15.16"), // AdGuard DNS Family Protection
+	netip.MustParseAddr("2a10:50c0::bad1:ff"), netip.MustParseAddr("2a10:50c0::bad2:ff"), // AdGuard DNS Family Protection v6
+	netip.MustParseAddr("94.130.180.225"), netip.MustParseAddr("78.47.64.161"), // DNS for Family
+	netip.MustParseAddr("76.76.2.4"), netip.MustParseAddr("76.76.10.4"), // Control D Family Friendly
+	netip.MustParseAddr("2606:1a40::4"), netip.MustParseAddr("2606:1a40:1::4"), // Control D Family Friendly v6
+	netip.MustParseAddr("4.150.168.57"), netip.MustParseAddr("104.197.28.121"), // Safe Surfer
+	netip.MustParseAddr("185.228.168.168"), netip.MustParseAddr("185.228.169.168"), // CleanBrowsing Family filter
+	netip.MustParseAddr("2a0d:2a00:1::"), netip.MustParseAddr("2a0d:2a00:2::"), // CleanBrowsing Family filter v6
 }
 
 // Blocklist is a set of blocked domains with subdomain matching: if a domain
@@ -75,6 +180,7 @@ type Blocklist struct {
 	mu      sync.RWMutex
 	blocked map[string]struct{}
 	allowed map[string]struct{}
+	forced  map[string]struct{} // blocked even when allowed; kept across Reload
 }
 
 // NewBlocklist returns an empty blocklist.
@@ -82,7 +188,20 @@ func NewBlocklist() *Blocklist {
 	return &Blocklist{
 		blocked: make(map[string]struct{}),
 		allowed: make(map[string]struct{}),
+		forced:  make(map[string]struct{}),
 	}
+}
+
+// ForceBlock adds a domain (and all its subdomains) that is blocked even when
+// the allowlist covers it.
+func (b *Blocklist) ForceBlock(domain string) {
+	d := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain), "."))
+	if d == "" {
+		return
+	}
+	b.mu.Lock()
+	b.forced[d] = struct{}{}
+	b.mu.Unlock()
 }
 
 // Allow adds a domain (and all its subdomains) to the allowlist, so it is never
@@ -147,8 +266,11 @@ func (b *Blocklist) Blocked(qname string) bool {
 	}
 	b.mu.RLock()
 	defer b.mu.RUnlock()
+	if matches(b.forced, n) {
+		return true
+	}
 	if matches(b.allowed, n) {
-		return false // allowlist takes precedence
+		return false // allowlist takes precedence over the loaded lists
 	}
 	return matches(b.blocked, n)
 }
@@ -179,6 +301,16 @@ func (b *Blocklist) AllowMatch(qname string) (string, bool) {
 // LoadURL fetches and parses a blocklist, merging it into the set. It returns
 // the number of domains added.
 func (b *Blocklist) LoadURL(url string) (int, error) {
+	return b.loadURL(url, false)
+}
+
+// LoadAllowURL fetches and parses a list like LoadURL, but merges it into the
+// allowlist. It returns the number of domains added.
+func (b *Blocklist) LoadAllowURL(url string) (int, error) {
+	return b.loadURL(url, true)
+}
+
+func (b *Blocklist) loadURL(url string, allow bool) (int, error) {
 	client := &http.Client{Timeout: 60 * time.Second}
 	resp, err := client.Get(url)
 	if err != nil {
@@ -188,6 +320,9 @@ func (b *Blocklist) LoadURL(url string) (int, error) {
 	if resp.StatusCode != http.StatusOK {
 		return 0, fmt.Errorf("fetch %s: status %s", url, resp.Status)
 	}
+	if allow {
+		return b.loadReader(resp.Body, b.allowed), nil
+	}
 	return b.LoadReader(resp.Body), nil
 }
 
@@ -195,6 +330,11 @@ func (b *Blocklist) LoadURL(url string) (int, error) {
 // (`0.0.0.0 domain`), or plain-domain form, ignoring comments and rules that
 // are not simple domain matches. It returns the number of domains added.
 func (b *Blocklist) LoadReader(r io.Reader) int {
+	return b.loadReader(r, b.blocked)
+}
+
+// loadReader parses r into set (b.blocked or b.allowed).
+func (b *Blocklist) loadReader(r io.Reader, set map[string]struct{}) int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	added := 0
@@ -205,8 +345,8 @@ func (b *Blocklist) LoadReader(r io.Reader) int {
 		if d == "" {
 			continue
 		}
-		if _, exists := b.blocked[d]; !exists {
-			b.blocked[d] = struct{}{}
+		if _, exists := set[d]; !exists {
+			set[d] = struct{}{}
 			added++
 		}
 	}
@@ -224,6 +364,11 @@ func parseBlocklistLine(line string) string {
 	case '!', '#', '[': // ABP/hosts comments and ABP header
 		return ""
 	}
+	// Trailing "  # comment" (ShadowWhisperer lists). ABP "##" cosmetic rules
+	// have no space before the '#' and are rejected below.
+	if i := strings.IndexByte(s, '#'); i > 0 && (s[i-1] == ' ' || s[i-1] == '\t') {
+		s = strings.TrimSpace(s[:i])
+	}
 
 	// hosts form: "0.0.0.0 domain" or "127.0.0.1 domain"
 	if strings.HasPrefix(s, "0.0.0.0 ") || strings.HasPrefix(s, "127.0.0.1 ") {
@@ -239,8 +384,8 @@ func parseBlocklistLine(line string) string {
 	s = strings.TrimPrefix(s, "*.")
 
 	// Reject anything that isn't a plain domain (paths, wildcards, options,
-	// regex anchors, schemes).
-	if strings.ContainsAny(s, "/*$|^?= \t") {
+	// regex anchors, schemes, cosmetic "##" rules).
+	if strings.ContainsAny(s, "/*$|^?=# \t") {
 		return ""
 	}
 	if s == "" || !strings.Contains(s, ".") {
@@ -249,23 +394,41 @@ func parseBlocklistLine(line string) string {
 	return strings.ToLower(s)
 }
 
-// Reload fetches urls (or DefaultBlocklists if empty) into a fresh set, adds
-// any extra domains, then atomically swaps the contents in. Readers calling
-// Blocked concurrently see either the old or the new set, never a partial one.
-func (b *Blocklist) Reload(urls []string, extra ...string) {
+// Reload fetches urls (or DefaultBlocklists if empty) and allowURLs into fresh
+// sets, adds the extra blocked and allow domains, then atomically swaps the
+// contents in. Readers calling Blocked concurrently see either the old or the
+// new sets, never a partial one.
+func (b *Blocklist) Reload(urls, allowURLs, extra, allow []string) {
 	tmp := NewBlocklist()
+	for _, d := range allow {
+		tmp.Allow(d)
+	}
+	tmp.LoadAllowlists(allowURLs)
 	tmp.LoadDefaults(urls)
 	for _, d := range extra {
 		tmp.Add(d)
 	}
 	tmp.mu.RLock()
-	m := tmp.blocked
+	m, a := tmp.blocked, tmp.allowed
 	tmp.mu.RUnlock()
 
 	b.mu.Lock()
-	b.blocked = m
+	b.blocked, b.allowed = m, a
 	b.mu.Unlock()
-	log.Printf("blocklist: reloaded, %d domains", len(m))
+	log.Printf("blocklist: reloaded, %d domains (%d allowlisted)", len(m), len(a))
+}
+
+// LoadAllowlists loads the given allowlist URLs. Failures on individual lists
+// are logged, not fatal.
+func (b *Blocklist) LoadAllowlists(urls []string) {
+	for _, u := range urls {
+		n, err := b.LoadAllowURL(u)
+		if err != nil {
+			log.Printf("allowlist: %v", err)
+			continue
+		}
+		log.Printf("allowlist: loaded %d domains from %s", n, u)
+	}
 }
 
 // LoadDefaults loads the given URLs (or DefaultBlocklists if none) and logs a

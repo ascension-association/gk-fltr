@@ -46,6 +46,7 @@ type IPBlocker struct {
 	cidr6 *nftables.Set
 	cur4  map[string]ival // current v4 intervals, merged + non-overlapping
 	cur6  map[string]ival // current v6 intervals
+	allow []netip.Addr    // punched out of the CIDR ranges (SetAllowIPs)
 }
 
 // ival is a half-open address interval [start, end) as raw big-endian bytes
@@ -295,6 +296,7 @@ func (b *IPBlocker) BlockCIDRs(prefixes []netip.Prefix) error {
 	defer b.mu.Unlock()
 
 	b.cur4, b.cur6 = buildIntervals(prefixes)
+	excludeAddrs(b.cur4, b.cur6, b.allow)
 
 	// Create the (empty) sets and drop rules first, then add the elements in
 	// batches: a single netlink message holding every element overflows the
@@ -360,6 +362,7 @@ func (b *IPBlocker) ReplaceCIDRs(prefixes []netip.Prefix) error {
 	}
 
 	want4, want6 := buildIntervals(prefixes)
+	excludeAddrs(want4, want6, b.allow)
 	add4, del4 := diffIvals(b.cur4, want4)
 	add6, del6 := diffIvals(b.cur6, want6)
 
@@ -385,6 +388,43 @@ func (b *IPBlocker) ReplaceCIDRs(prefixes []netip.Prefix) error {
 	log.Printf("nft: CIDR ranges updated (+%d/-%d v4, +%d/-%d v6)",
 		len(add4), len(del4), len(add6), len(del6))
 	return nil
+}
+
+// SetAllowIPs sets addresses that are never blocked by the CIDR ranges: any
+// loaded range containing one is split around it. It takes effect on the next
+// BlockCIDRs or ReplaceCIDRs.
+func (b *IPBlocker) SetAllowIPs(ips []netip.Addr) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.allow = ips
+}
+
+// excludeAddrs splits the intervals in v4/v6 that contain an address in
+// allow, leaving the address itself out.
+func excludeAddrs(v4, v6 map[string]ival, allow []netip.Addr) {
+	for _, a := range allow {
+		a = a.Unmap()
+		m := v4
+		if a.Is6() {
+			m = v6
+		}
+		at := a.AsSlice()
+		for k, iv := range m {
+			if bytes.Compare(iv.start, at) > 0 || bytes.Compare(at, iv.end) >= 0 {
+				continue
+			}
+			delete(m, k)
+			if bytes.Compare(iv.start, at) < 0 {
+				m[ivalKey(iv.start, at)] = ival{iv.start, at}
+			}
+			if next := a.Next(); next.IsValid() {
+				if n := next.AsSlice(); bytes.Compare(n, iv.end) < 0 {
+					m[ivalKey(n, iv.end)] = ival{n, iv.end}
+				}
+			}
+			break // intervals are non-overlapping
+		}
+	}
 }
 
 // CIDRStats reports how many merged ranges are in cidr_v4 and cidr_v6, and how

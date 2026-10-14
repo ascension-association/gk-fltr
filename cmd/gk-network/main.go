@@ -42,10 +42,12 @@ func main() {
 	// Default to Safe Surfer's family-filtering resolvers (safesurfer.io).
 	upstream1 := flag.String("upstream", "4.150.168.57", "primary upstream DNS server (IPv4, :53 assumed if no port)")
 	upstream2 := flag.String("upstream2", "104.197.28.121", "secondary/failover upstream DNS server (IPv4, :53 assumed if no port)")
-	blocklistsCSV := flag.String("blocklists", "", "comma-separated blocklist URLs for DNS sinkholing (default: OISD Small + OISD NSFW + HaGeZi Anti-Piracy + HaGeZi Gambling + HaGeZi NSFW + StevenBlack Fake News + HaGeZi Native Trackers + HaGeZi Pop-Up Ads + HaGeZi Fake)")
+	blocklistsCSV := flag.String("blocklists", "", "comma-separated blocklist URLs for DNS sinkholing (default: OISD Small + OISD NSFW + HaGeZi Anti-Piracy + HaGeZi Gambling + HaGeZi NSFW + StevenBlack Fake News + HaGeZi Native Trackers + HaGeZi Pop-Up Ads + HaGeZi Fake + ShadowWhisperer Gambling/Malware/Remote/Risk/Scam/Shock/Typo)")
 	blockCSV := flag.String("block", "", "comma-separated domains to always sinkhole (added to the built-in defaults)")
+	allowlistsCSV := flag.String("allowlists", "", "comma-separated allowlist URLs; listed domains are never sinkholed (default: ShadowWhisperer Whitelist + BadBlock captive/certs/time/push/safe-browsing/captcha; \"none\" disables)")
 	allowCSV := flag.String("allow", "", "comma-separated domains to never sinkhole (allowlist; added to the built-in defaults)")
 	blockNFT := flag.Bool("block-nft", false, "install nftables named sets (blocked_v4/blocked_v6) and a forward-path drop rule")
+	allowIPsCSV := flag.String("allow-ips", "", "comma-separated IPs never blocked by the IP range lists (added to the built-in defaults)")
 	blockIPsCSV := flag.String("block-ips", "", "comma-separated IPs to seed into the nftables block sets (implies -block-nft)")
 	ipBlocklistsCSV := flag.String("ip-blocklists", "", "comma-separated CIDR blocklist URLs (gz ok) for nftables range blocking (default: DoH + malicious-source lists; \"none\" disables)")
 	blockCountries := flag.Bool("block-countries", true, "block forwarded traffic to IP ranges of the full/partial U.S. entry-suspension countries (CRS IN12631; uses nftables)")
@@ -102,7 +104,22 @@ func main() {
 		seedIPs = append(seedIPs, ip)
 	}
 
-	// DNS domain blocklist (OISD Small + NSFW + HaGeZi Anti-Piracy + Gambling + NSFW + StevenBlack Fake News + HaGeZi Native Trackers + HaGeZi Pop-Up Ads + HaGeZi Fake by default).
+	// IP allowlist (never blocked by the range lists): built-in defaults plus
+	// -allow-ips entries.
+	allowIPs := append([]netip.Addr(nil), filter.DefaultAllowIPs...)
+	for _, s := range strings.Split(*allowIPsCSV, ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		ip, err := netip.ParseAddr(s)
+		if err != nil {
+			log.Fatalf("invalid -allow-ips entry %q", s)
+		}
+		allowIPs = append(allowIPs, ip)
+	}
+
+	// DNS domain blocklist (OISD Small + NSFW + HaGeZi Anti-Piracy + Gambling + NSFW + StevenBlack Fake News + HaGeZi Native Trackers + HaGeZi Pop-Up Ads + HaGeZi Fake + ShadowWhisperer Gambling/Malware/Remote/Risk/Scam/Shock/Typo by default).
 	var dnsURLs []string
 	for _, u := range strings.Split(*blocklistsCSV, ",") {
 		if u = strings.TrimSpace(u); u != "" {
@@ -133,17 +150,40 @@ func main() {
 		dnsURLs = append(dnsURLs, filter.VPNDomainBlocklists...)
 		domainSources = append(domainSources, filter.DomainSource{Name: "VPN tool domains (-block-vpn)", Domains: filter.VPNDomains})
 	}
+	// Force-blocked domains win over the allowlists; they are not part of
+	// extra, since Blocklist keeps them across reloads itself.
+	domainSources = append(domainSources, filter.DomainSource{Name: "built-in force-block domains", Domains: filter.DefaultForceBlockDomains, Force: true})
 	var extra []string
 	for _, src := range domainSources {
-		extra = append(extra, src.Domains...)
-	}
-	// Allowlist (never sinkholed): built-in defaults plus -allow entries.
-	allow := append([]string(nil), filter.DefaultAllowDomains...)
-	for _, d := range strings.Split(*allowCSV, ",") {
-		if d = strings.TrimSpace(d); d != "" {
-			allow = append(allow, d)
+		if !src.Force {
+			extra = append(extra, src.Domains...)
 		}
 	}
+	// Allowlist (never sinkholed): -allowlists (the defaults when empty,
+	// nothing when "none"), plus the built-in defaults and -allow entries.
+	var allowURLs []string
+	switch v := strings.TrimSpace(*allowlistsCSV); {
+	case strings.EqualFold(v, "none"):
+	case v == "":
+		allowURLs = append(allowURLs, filter.DefaultAllowlists...)
+	default:
+		for _, u := range strings.Split(v, ",") {
+			if u = strings.TrimSpace(u); u != "" {
+				allowURLs = append(allowURLs, u)
+			}
+		}
+	}
+	var userAllow []string
+	for _, d := range strings.Split(*allowCSV, ",") {
+		if d = strings.TrimSpace(d); d != "" {
+			userAllow = append(userAllow, d)
+		}
+	}
+	allowSources := []filter.DomainSource{
+		{Name: "built-in allowlist", Domains: filter.DefaultAllowDomains},
+		{Name: "-allow", Domains: userAllow},
+	}
+	allow := append(append([]string(nil), filter.DefaultAllowDomains...), userAllow...)
 
 	if *checkCSV != "" {
 		var checkDNSURLs []string
@@ -160,7 +200,15 @@ func main() {
 			ipSources = append(ipSources, filter.IPSource{Name: "DoH endpoints, port 443 only (-block-encrypted-dns)", Addrs: filter.DefaultDoHEndpoints})
 		}
 		log.Print("check: fetching lists...")
-		c := filter.NewChecker(checkDNSURLs, domainSources, allow, ipURLs, ipSources)
+		c := filter.NewChecker(filter.CheckerConfig{
+			DomainURLs:    checkDNSURLs,
+			DomainSources: domainSources,
+			AllowURLs:     allowURLs,
+			AllowSources:  allowSources,
+			IPURLs:        ipURLs,
+			IPSources:     ipSources,
+			AllowIPs:      allowIPs,
+		})
 		runCheck(*checkCSV, c, *dnsAddr != "", *allowIPv6)
 		return
 	}
@@ -273,6 +321,7 @@ func main() {
 			}
 		}
 		if ipBlockEnabled {
+			blocker.SetAllowIPs(allowIPs)
 			prefixes := filter.LoadIPBlocklists(ipURLs)
 			if len(prefixes) > 0 {
 				if err := blocker.BlockCIDRs(prefixes); err != nil {
@@ -295,6 +344,10 @@ func main() {
 		for _, d := range allow {
 			bl.Allow(d)
 		}
+		for _, d := range filter.DefaultForceBlockDomains {
+			bl.ForceBlock(d)
+		}
+		bl.LoadAllowlists(allowURLs)
 		bl.LoadDefaults(dnsURLs) // uses defaults when dnsURLs is empty
 		for _, d := range extra {
 			bl.Add(d)
@@ -318,7 +371,7 @@ func main() {
 			defer t.Stop()
 			for range t.C {
 				if bl != nil {
-					bl.Reload(dnsURLs, extra...)
+					bl.Reload(dnsURLs, allowURLs, extra, allow)
 				}
 				if blocker != nil && ipBlockEnabled {
 					if prefixes := filter.LoadIPBlocklists(ipURLs); len(prefixes) > 0 {
@@ -399,13 +452,19 @@ func runCheck(targets string, c *filter.Checker, dnsOn, allowIPv6 bool) {
 
 		name := strings.ToLower(strings.TrimSuffix(t, "."))
 		hits, allowedBy := c.Domain(name)
+		blocked := len(hits) > 0 && len(allowedBy) == 0
+		for _, h := range hits {
+			blocked = blocked || h.Forced
+		}
 		switch {
 		case !dnsOn:
 			fmt.Printf("%s: DNS filtering disabled (-dns \"\")\n", name)
-		case len(hits) > 0 && allowedBy == "":
+		case blocked:
 			fmt.Printf("%s: BLOCKED (DNS sinkhole)\n", name)
 		case len(hits) > 0:
-			fmt.Printf("%s: allowed by allowlist entry %s, despite:\n", name, allowedBy)
+			fmt.Printf("%s: allowed by allowlist:\n", name)
+			printHits(allowedBy)
+			fmt.Println("  despite:")
 		default:
 			if safe, ok := filter.SafeSearchHost(name); ok {
 				fmt.Printf("%s: not blocked; answered with %s (safe search)\n", name, safe)
@@ -414,7 +473,7 @@ func runCheck(targets string, c *filter.Checker, dnsOn, allowIPv6 bool) {
 			}
 		}
 		printHits(hits)
-		if dnsOn && len(hits) > 0 && allowedBy == "" {
+		if dnsOn && blocked {
 			continue // clients never get an address to connect to
 		}
 
@@ -443,13 +502,17 @@ func checkIP(label string, ip netip.Addr, c *filter.Checker, allowIPv6 bool) {
 	case filter.IsReservedAddr(ip):
 		fmt.Printf("%s: not blocked (reserved/private range, never blocked)\n", label)
 	default:
-		hits := c.IP(ip)
-		if len(hits) == 0 {
+		hits, allowed := c.IP(ip)
+		switch {
+		case len(hits) > 0:
+			fmt.Printf("%s: BLOCKED (IP)\n", label)
+			printHits(hits)
+		case len(allowed) > 0:
+			fmt.Printf("%s: allowed by IP allowlist, despite:\n", label)
+			printHits(allowed)
+		default:
 			fmt.Printf("%s: not blocked by IP\n", label)
-			return
 		}
-		fmt.Printf("%s: BLOCKED (IP)\n", label)
-		printHits(hits)
 	}
 }
 

@@ -107,3 +107,32 @@ func TestCIDRStats(t *testing.T) {
 		t.Errorf("CIDRStats = %d, %d, %d; want 3, 1, %d", r4, r6, a4, 256+65536+1)
 	}
 }
+
+func TestExcludeAddrs(t *testing.T) {
+	v4, v6 := buildIntervals(mustPrefixes("1.2.3.0/24", "5.6.7.8/32", "2001:db8::/126"))
+	excludeAddrs(v4, v6, []netip.Addr{
+		netip.MustParseAddr("1.2.3.0"),   // first address of a range
+		netip.MustParseAddr("1.2.3.100"), // middle
+		netip.MustParseAddr("5.6.7.8"),   // whole /32
+		netip.MustParseAddr("9.9.9.9"),   // not in any range
+		netip.MustParseAddr("2001:db8::3"),
+	})
+	want4, want6 := buildIntervals(mustPrefixes(
+		"1.2.3.1/32", "1.2.3.2/31", "1.2.3.4/30", "1.2.3.8/29", "1.2.3.16/28", "1.2.3.32/27", "1.2.3.64/27", "1.2.3.96/30",
+		"1.2.3.101/32", "1.2.3.102/31", "1.2.3.104/29", "1.2.3.112/28", "1.2.3.128/25",
+		"2001:db8::/127", "2001:db8::2/128",
+	))
+	if len(v4) != len(want4) || len(v6) != len(want6) {
+		t.Fatalf("got %d v4 / %d v6 intervals, want %d / %d", len(v4), len(v6), len(want4), len(want6))
+	}
+	for k := range want4 {
+		if _, ok := v4[k]; !ok {
+			t.Errorf("missing v4 interval %x", k)
+		}
+	}
+	for k := range want6 {
+		if _, ok := v6[k]; !ok {
+			t.Errorf("missing v6 interval %x", k)
+		}
+	}
+}

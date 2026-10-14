@@ -27,9 +27,11 @@ Run `gk-network -help` to list all flags and their defaults.
 - `-dns`       listen address for the safe-search resolver (default `:53`; `""` disables)
 - `-upstream`   primary upstream DNS server (default `4.150.168.57`; `:53` assumed)
 - `-upstream2`  secondary/failover upstream DNS server (default `104.197.28.121`)
-- `-blocklists` comma-separated blocklist URLs (default: OISD Small + OISD NSFW + HaGeZi Anti-Piracy + HaGeZi Gambling + HaGeZi NSFW + StevenBlack Fake News + HaGeZi Native Trackers + HaGeZi Pop-Up Ads + HaGeZi Fake)
+- `-blocklists` comma-separated blocklist URLs (default: OISD Small + OISD NSFW + HaGeZi Anti-Piracy + HaGeZi Gambling + HaGeZi NSFW + StevenBlack Fake News + HaGeZi Native Trackers + HaGeZi Pop-Up Ads + HaGeZi Fake + ShadowWhisperer Gambling/Malware/Remote/Risk/Scam/Shock/Typo)
 - `-block`      comma-separated domains to always sinkhole (adds to built-in defaults)
+- `-allowlists` comma-separated allowlist URLs, same formats as `-blocklists` (default: ShadowWhisperer Whitelist + BadBlock captive/certs/time/push/safe-browsing/captcha whitelists; `none` disables)
 - `-allow`      comma-separated domains to never sinkhole (allowlist; adds to built-in defaults)
+- `-allow-ips`  comma-separated IPs never blocked by the IP range lists (adds to built-in defaults: the OpenDNS FamilyShield, Yandex DNS Family, UltraDNS Public Family Secure, AdGuard DNS Family Protection, DNS for Family, Control D Family Friendly, Safe Surfer, and CleanBrowsing Family filter resolvers)
 - `-block-nft`  install nftables named sets + forward-path drop rule
 - `-block-ips`  comma-separated IPs to seed into the block sets (implies `-block-nft`)
 - `-ip-blocklists` CIDR range blocklist URLs, gz ok (default: DoH + malicious-source lists; `none` disables)
@@ -68,6 +70,11 @@ The entry in parentheses is what matched: the listed (parent) domain or the cont
 | bing.com / www.bing.com      | strict.bing.com               |
 | duckduckgo.com               | safe.duckduckgo.com           |
 
+### Allowlist
+
+- [BadBlock Whitelists](https://github.com/celenityy/BadBlock/tree/pages/abp) - captive portal, certificate, time, push notification, safe browsing, and captcha domains
+- [ShadowWhisperer Whitelist](https://github.com/ShadowWhisperer/BlockLists/blob/master/Whitelists/Whitelist)
+
 ### Automatic Refresh
 
 Many of these lists update daily. The appliance re-fetches both layers on an interval (default every `12h`, `-refresh 0` to disable):
@@ -103,6 +110,7 @@ Many of these lists update daily. The appliance re-fetches both layers on an int
 - [ipdeny](https://www.ipdeny.com/): provides geo data
 - [oisd](https://oisd.nl/): blocks ads, malware, and porn
 - [Safe Surfer](https://safesurfer.io): provides family-friendly upstream DNS filtering
+- [ShadowWhisperer](https://github.com/ShadowWhisperer/BlockLists): blocks gambling, malware, phishing, remote-control tools, risky hosts, scams, gore, typosquatting, VPN, and proxy domains
 - [StevenBlack](https://github.com/StevenBlack/hosts): blocks fake news sites
 - [X4BNet](https://github.com/X4BNet/lists_vpn): blocks VPNs
 
