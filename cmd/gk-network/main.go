@@ -39,7 +39,7 @@ func main() {
 	// Default to Safe Surfer's family-filtering resolvers (safesurfer.io).
 	upstream1 := flag.String("upstream", "4.150.168.57", "primary upstream DNS server (IPv4, :53 assumed if no port)")
 	upstream2 := flag.String("upstream2", "104.197.28.121", "secondary/failover upstream DNS server (IPv4, :53 assumed if no port)")
-	blocklistsCSV := flag.String("blocklists", "", "comma-separated blocklist URLs for DNS sinkholing (default: OISD Small + OISD NSFW + HaGeZi Anti-Piracy)")
+	blocklistsCSV := flag.String("blocklists", "", "comma-separated blocklist URLs for DNS sinkholing (default: OISD Small + OISD NSFW + HaGeZi Anti-Piracy + HaGeZi Gambling + HaGeZi NSFW + StevenBlack Fake News)")
 	blockCSV := flag.String("block", "", "comma-separated domains to always sinkhole (added to the built-in defaults)")
 	allowCSV := flag.String("allow", "", "comma-separated domains to never sinkhole (allowlist; added to the built-in defaults)")
 	blockNFT := flag.Bool("block-nft", false, "install nftables named sets (blocked_v4/blocked_v6) and a forward-path drop rule")
@@ -225,7 +225,7 @@ func main() {
 		ss.SetBlockIPv6(!*allowIPv6)
 		ss.SetAllowECH(*allowECH)
 
-		// DNS domain blocklist (OISD Small + NSFW + HaGeZi Anti-Piracy by default).
+		// DNS domain blocklist (OISD Small + NSFW + HaGeZi Anti-Piracy + Gambling + NSFW + StevenBlack Fake News by default).
 		for _, u := range strings.Split(*blocklistsCSV, ",") {
 			if u = strings.TrimSpace(u); u != "" {
 				dnsURLs = append(dnsURLs, u)

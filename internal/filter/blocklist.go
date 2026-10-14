@@ -13,12 +13,18 @@ import (
 
 // DefaultBlocklists are the lists loaded when none are specified: OISD Small
 // (ads/trackers/malware) and OISD NSFW (adult content), both served in ABP
-// syntax (see https://oisd.nl/), and HaGeZi Anti-Piracy (piracy sites, as
-// plain domains; see https://github.com/hagezi/dns-blocklists).
+// syntax (see https://oisd.nl/), plus HaGeZi Anti-Piracy (piracy sites),
+// HaGeZi Gambling (gambling sites), and HaGeZi NSFW (adult content not in
+// OISD NSFW), all as plain domains (see
+// https://github.com/hagezi/dns-blocklists), and StevenBlack's fakenews-only
+// hosts file (see https://github.com/StevenBlack/hosts).
 var DefaultBlocklists = []string{
 	"https://small.oisd.nl/",
 	"https://nsfw.oisd.nl/",
 	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/anti.piracy-onlydomains.txt",
+	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling-onlydomains.txt",
+	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/nsfw-onlydomains.txt",
+	"https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/fakenews-only/hosts",
 }
 
 // DefaultBypassDomains are individual domains sinkholed when bypass /

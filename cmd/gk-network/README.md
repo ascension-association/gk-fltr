@@ -27,7 +27,7 @@ Run `gk-network -help` to list all flags and their defaults.
 - `-dns`       listen address for the safe-search resolver (default `:53`; `""` disables)
 - `-upstream`   primary upstream DNS server (default `4.150.168.57`; `:53` assumed)
 - `-upstream2`  secondary/failover upstream DNS server (default `104.197.28.121`)
-- `-blocklists` comma-separated blocklist URLs (default: OISD Small + OISD NSFW + HaGeZi Anti-Piracy)
+- `-blocklists` comma-separated blocklist URLs (default: OISD Small + OISD NSFW + HaGeZi Anti-Piracy + HaGeZi Gambling + HaGeZi NSFW + StevenBlack Fake News)
 - `-block`      comma-separated domains to always sinkhole (adds to built-in defaults)
 - `-allow`      comma-separated domains to never sinkhole (allowlist; adds to built-in defaults)
 - `-block-nft`  install nftables named sets + forward-path drop rule
@@ -80,10 +80,11 @@ Many of these lists update daily. The appliance re-fetches both layers on an int
     - [iblocklist_onion_router](https://iplists.firehol.org/?ipset=iblocklist_onion_router) ([I-Blocklist](https://www.iblocklist.com/)): blocks Tor relays
     - [sslproxies](https://iplists.firehol.org/?ipset=sslproxies) ([SSLProxies](https://www.sslproxies.org/)): blocks open SSL proxies
     - [tor_exits](https://iplists.firehol.org/?ipset=tor_exits) ([Tor Project](https://check.torproject.org/)): blocks Tor exit relays
-- [HaGeZi](https://github.com/hagezi/dns-blocklists): blocks piracy sites, encrypted DNS, VPN, Tor, and proxy bypass domains
+- [HaGeZi](https://github.com/hagezi/dns-blocklists): blocks piracy sites, gambling sites, porn, encrypted DNS, VPN, Tor, and proxy bypass domains
 - [I-Blocklist](https://www.iblocklist.com/list?list=dufcxgnbjsdwmwctgfuj): blocks people who have shared child pornography in the P2P community
 - [ipdeny](https://www.ipdeny.com/): provides geo data
 - [oisd](https://oisd.nl/): blocks ads, malware, and porn
 - [Safe Surfer](https://safesurfer.io): provides family-friendly upstream DNS filtering
+- [StevenBlack](https://github.com/StevenBlack/hosts): blocks fake news sites
 - [X4BNet](https://github.com/X4BNet/lists_vpn): blocks VPNs
 
