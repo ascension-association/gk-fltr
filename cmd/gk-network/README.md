@@ -27,7 +27,7 @@ Run `gk-network -help` to list all flags and their defaults.
 - `-dns`       listen address for the safe-search resolver (default `:53`; `""` disables)
 - `-upstream`   primary upstream DNS server (default `4.150.168.57`; `:53` assumed)
 - `-upstream2`  secondary/failover upstream DNS server (default `104.197.28.121`)
-- `-blocklists` comma-separated blocklist URLs (default: OISD Small + OISD NSFW + HaGeZi Anti-Piracy + HaGeZi Gambling + HaGeZi NSFW + StevenBlack Fake News)
+- `-blocklists` comma-separated blocklist URLs (default: OISD Small + OISD NSFW + HaGeZi Anti-Piracy + HaGeZi Gambling + HaGeZi NSFW + StevenBlack Fake News + HaGeZi Native Trackers + HaGeZi Pop-Up Ads + HaGeZi Fake)
 - `-block`      comma-separated domains to always sinkhole (adds to built-in defaults)
 - `-allow`      comma-separated domains to never sinkhole (allowlist; adds to built-in defaults)
 - `-block-nft`  install nftables named sets + forward-path drop rule
@@ -40,6 +40,24 @@ Run `gk-network -help` to list all flags and their defaults.
 - `-block-vpn` block VPNs: WireGuard handshakes on any UDP port, default VPN / mesh protocol ports, VPN provider and tool domains, and commercial VPN server IP ranges (default on; `-block-vpn=false` disables; uses nftables)
 - `-redirect-dns` transparently redirect clients' port-53 DNS to this resolver (default on; needs resolver on :53)
 - `-refresh`    how often to re-fetch domain + IP blocklists (default `12h`; `0` disables)
+- `-check`      comma-separated domains or IPs to look up: reports whether each is blocked and which list(s) include it, then exits without steering (see below)
+
+### Checking a Domain or IP
+
+Run with `-check` to see whether something is blocked and why. It fetches the same lists the appliance would load under the other flags given, so pass the same flags as your deployment:
+
+```
+$ gk-network -check metrics.icloud.com,2.144.0.1,github.com
+metrics.icloud.com: BLOCKED (DNS sinkhole)
+    https://small.oisd.nl/ (metrics.icloud.com)
+    https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.apple-onlydomains.txt (metrics.icloud.com)
+2.144.0.1: BLOCKED (IP)
+    https://www.ipdeny.com/ipblocks/data/aggregated/ir-aggregated.zone (2.144.0.0/14)
+github.com: not blocked by DNS
+  resolves to 140.82.114.3: not blocked by IP
+```
+
+The entry in parentheses is what matched: the listed (parent) domain or the containing IP range. Domains that aren't sinkholed are also resolved with the local resolver and each address is checked against the IP lists. Allowlist overrides, safe-search rewrites, reserved ranges, and dropped IPv6 are reported too.
 
 ### Safe-Search
 
@@ -80,7 +98,7 @@ Many of these lists update daily. The appliance re-fetches both layers on an int
     - [iblocklist_onion_router](https://iplists.firehol.org/?ipset=iblocklist_onion_router) ([I-Blocklist](https://www.iblocklist.com/)): blocks Tor relays
     - [sslproxies](https://iplists.firehol.org/?ipset=sslproxies) ([SSLProxies](https://www.sslproxies.org/)): blocks open SSL proxies
     - [tor_exits](https://iplists.firehol.org/?ipset=tor_exits) ([Tor Project](https://check.torproject.org/)): blocks Tor exit relays
-- [HaGeZi](https://github.com/hagezi/dns-blocklists): blocks piracy sites, gambling sites, porn, encrypted DNS, VPN, Tor, and proxy bypass domains
+- [HaGeZi](https://github.com/hagezi/dns-blocklists): blocks piracy sites, gambling sites, porn, native device/app/OS trackers, pop-up ads, scam/fake stores, encrypted DNS, VPN, Tor, and proxy bypass domains
 - [I-Blocklist](https://www.iblocklist.com/list?list=dufcxgnbjsdwmwctgfuj): blocks people who have shared child pornography in the P2P community
 - [ipdeny](https://www.ipdeny.com/): provides geo data
 - [oisd](https://oisd.nl/): blocks ads, malware, and porn

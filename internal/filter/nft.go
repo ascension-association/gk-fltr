@@ -387,6 +387,17 @@ func (b *IPBlocker) ReplaceCIDRs(prefixes []netip.Prefix) error {
 	return nil
 }
 
+// CIDRStats reports how many merged ranges are in cidr_v4 and cidr_v6, and how
+// many IPv4 addresses the v4 ranges cover.
+func (b *IPBlocker) CIDRStats() (ranges4, ranges6 int, addrs4 uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, iv := range b.cur4 {
+		addrs4 += uint64(binary.BigEndian.Uint32(iv.end) - binary.BigEndian.Uint32(iv.start))
+	}
+	return len(b.cur4), len(b.cur6), addrs4
+}
+
 // buildIntervals converts prefixes into merged, non-overlapping v4 and v6
 // interval sets. Merging is required because the blocklists overlap and
 // adjoin, and an nftables interval set rejects overlapping elements (EEXIST).

@@ -91,3 +91,19 @@ func TestDiffIvals(t *testing.T) {
 		t.Errorf("identical diff = (+%d,-%d), want (0,0)", len(add), len(del))
 	}
 }
+
+func TestCIDRStats(t *testing.T) {
+	var b IPBlocker
+	b.cur4, b.cur6 = buildIntervals([]netip.Prefix{
+		netip.MustParsePrefix("203.0.113.0/24"), // reserved (documentation): skipped
+		netip.MustParsePrefix("1.2.3.0/24"),
+		netip.MustParsePrefix("1.2.3.128/25"), // inside the /24: merged
+		netip.MustParsePrefix("5.6.0.0/16"),
+		netip.MustParsePrefix("8.8.8.8/32"),
+		netip.MustParsePrefix("2001:db8::/32"),
+	})
+	r4, r6, a4 := b.CIDRStats()
+	if r4 != 3 || r6 != 1 || a4 != 256+65536+1 {
+		t.Errorf("CIDRStats = %d, %d, %d; want 3, 1, %d", r4, r6, a4, 256+65536+1)
+	}
+}

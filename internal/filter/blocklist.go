@@ -16,8 +16,11 @@ import (
 // syntax (see https://oisd.nl/), plus HaGeZi Anti-Piracy (piracy sites),
 // HaGeZi Gambling (gambling sites), and HaGeZi NSFW (adult content not in
 // OISD NSFW), all as plain domains (see
-// https://github.com/hagezi/dns-blocklists), and StevenBlack's fakenews-only
-// hosts file (see https://github.com/StevenBlack/hosts).
+// https://github.com/hagezi/dns-blocklists), StevenBlack's fakenews-only
+// hosts file (see https://github.com/StevenBlack/hosts), HaGeZi's Native
+// Tracker lists (built-in telemetry from device vendors, apps, and OSes),
+// HaGeZi Pop-Up Ads (pop-up, pop-under, and malicious ad domains), and HaGeZi
+// Fake (fake stores, scams, and fraud sites).
 var DefaultBlocklists = []string{
 	"https://small.oisd.nl/",
 	"https://nsfw.oisd.nl/",
@@ -25,6 +28,19 @@ var DefaultBlocklists = []string{
 	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/gambling-onlydomains.txt",
 	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/nsfw-onlydomains.txt",
 	"https://raw.githubusercontent.com/StevenBlack/hosts/master/alternates/fakenews-only/hosts",
+	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.amazon-onlydomains.txt",
+	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.apple-onlydomains.txt",
+	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.huawei-onlydomains.txt",
+	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.winoffice-onlydomains.txt",
+	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.samsung-onlydomains.txt",
+	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.tiktok-onlydomains.txt",
+	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.lgwebos-onlydomains.txt",
+	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.roku-onlydomains.txt",
+	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.vivo-onlydomains.txt",
+	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.oppo-realme-onlydomains.txt",
+	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/native.xiaomi-onlydomains.txt",
+	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/popupads-onlydomains.txt",
+	"https://raw.githubusercontent.com/hagezi/dns-blocklists/main/wildcard/fake-onlydomains.txt",
 }
 
 // DefaultBypassDomains are individual domains sinkholed when bypass /
@@ -84,14 +100,21 @@ func (b *Blocklist) Allow(domain string) {
 // matches reports whether name, or any parent domain of it, is a key in set.
 // The caller holds at least a read lock.
 func matches(set map[string]struct{}, name string) bool {
+	_, ok := matchKey(set, name)
+	return ok
+}
+
+// matchKey returns the key in set that covers name: name itself or its
+// nearest listed parent domain. The caller holds at least a read lock.
+func matchKey(set map[string]struct{}, name string) (string, bool) {
 	n := name
 	for {
 		if _, ok := set[n]; ok {
-			return true
+			return n, true
 		}
 		i := strings.IndexByte(n, '.')
 		if i < 0 {
-			return false
+			return "", false
 		}
 		n = n[i+1:]
 	}
@@ -128,6 +151,29 @@ func (b *Blocklist) Blocked(qname string) bool {
 		return false // allowlist takes precedence
 	}
 	return matches(b.blocked, n)
+}
+
+// Match returns the listed domain covering qname (qname itself or a parent),
+// ignoring the allowlist.
+func (b *Blocklist) Match(qname string) (string, bool) {
+	n := strings.ToLower(strings.TrimSuffix(qname, "."))
+	if n == "" {
+		return "", false
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return matchKey(b.blocked, n)
+}
+
+// AllowMatch returns the allowlist entry covering qname, if any.
+func (b *Blocklist) AllowMatch(qname string) (string, bool) {
+	n := strings.ToLower(strings.TrimSuffix(qname, "."))
+	if n == "" {
+		return "", false
+	}
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return matchKey(b.allowed, n)
 }
 
 // LoadURL fetches and parses a blocklist, merging it into the set. It returns
