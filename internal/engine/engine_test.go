@@ -148,6 +148,20 @@ func TestBlockByMACAndJA4(t *testing.T) {
 	}
 }
 
+func TestLabel(t *testing.T) {
+	e, got := newEngine(t, mustPolicy(t, ""))
+	e.cfg.Label = func(ja4 string) string {
+		if strings.HasPrefix(ja4, "t13d") {
+			return "Go TLS"
+		}
+		return ""
+	}
+	tlsFlow(t, e, netip.MustParseAddrPort("10.0.0.2:40000"), "www.youtube.com")
+	if len(*got) != 1 || (*got)[0].Label != "Go TLS" {
+		t.Fatalf("decisions = %+v, want one labelled \"Go TLS\"", *got)
+	}
+}
+
 func TestOtherTrafficNotBlocked(t *testing.T) {
 	e, got := newEngine(t, mustPolicy(t, "ip 0.0.0.0/0"))
 	tlsFlow(t, e, netip.MustParseAddrPort("192.168.1.10:50001"), "en.wikipedia.org")

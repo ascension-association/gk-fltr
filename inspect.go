@@ -12,16 +12,19 @@ import (
 	"time"
 
 	"github.com/ascension-association/gk-fltr/internal/engine"
+	"github.com/ascension-association/gk-fltr/internal/labels"
 	"github.com/ascension-association/gk-fltr/internal/policy"
 )
 
 // inspect classifies the flows in a pcap file and prints the decision the
 // router would make for each, which is handy for finding JA4 fingerprints
-// and testing rules.
+// and testing rules. With -learn, it adds the JA4 fingerprints it sees to the
+// labels file under the given label.
 func inspect(args []string) error {
 	fs := flag.NewFlagSet("gk-fltr inspect", flag.ExitOnError)
 	var c common
 	c.register(fs)
+	learn := fs.String("learn", "", "add every unlabelled JA4 fingerprint in the capture to the -labels file with this label")
 	fs.Usage = func() {
 		fmt.Fprintf(fs.Output(), "usage: gk-fltr inspect [flags] FILE.pcap\n\nflags:\n")
 		fs.PrintDefaults()
@@ -31,11 +34,26 @@ func inspect(args []string) error {
 		fs.Usage()
 		os.Exit(2)
 	}
+	if *learn != "" {
+		if c.labelsFile == "" {
+			return errors.New("-learn needs -labels FILE")
+		}
+		if err := labels.CheckLabel(*learn); err != nil {
+			return fmt.Errorf("invalid -learn: %w", err)
+		}
+	}
 
 	pol, err := c.policy()
 	if err != nil {
 		return err
 	}
+	lbls, err := c.labels()
+	if err != nil {
+		return err
+	}
+	// learned holds the unlabelled JA4s seen, in order of appearance.
+	var learned []string
+	seen := map[string]bool{}
 	mod, protos, err := c.module()
 	if err != nil {
 		return err
@@ -51,7 +69,12 @@ func inspect(args []string) error {
 		// Usage is not tracked offline: sources with an allowance are shown
 		// as METER, i.e. allowed while they have time left.
 		Admit: func(policy.Match) bool { return true },
+		Label: lbls.Lookup,
 		OnDecision: func(d engine.Decision) {
+			if *learn != "" && d.JA4 != "" && d.Label == "" && !seen[d.JA4] {
+				seen[d.JA4] = true
+				learned = append(learned, d.JA4)
+			}
 			if d.Target || c.verbose {
 				fmt.Println(formatDecision(d))
 			}
@@ -81,6 +104,17 @@ func inspect(args []string) error {
 		}
 	}
 	eng.Drain()
+
+	if *learn == "" {
+		return nil
+	}
+	if err := labels.Append(c.labelsFile, *learn, learned); err != nil {
+		return err
+	}
+	for _, j := range learned {
+		fmt.Printf("learned %s as %q\n", j, *learn)
+	}
+	fmt.Fprintf(os.Stderr, "added %d fingerprints to %s\n", len(learned), c.labelsFile)
 	return nil
 }
 

@@ -210,7 +210,8 @@ if needed:
 {"time":"2026-10-12T22:19:17.702995018Z","proto":"tcp","client":"192.168.1.10","client_port":35338,"server":"142.250.1.1","server_port":443,"mac":"02:00:00:00:00:10","class":"TLS.YouTube","host":"www.youtube.com","ja4":"t13d1516h2_8daaf6152771_02713d6af862","rule":{"type":"ip","value":"192.168.1.0/28"},"mode":"queue"}
 ```
 
-`time` is in UTC. `mac`, `host` and `ja4` are left out when unknown. `rule`
+`time` is in UTC. `mac`, `host` and `ja4` are left out when unknown, and so is
+`client_label` when [no label](#naming-fingerprints) matches. `rule`
 is the rule that matched. When the file would exceed `-block-log-max-size`
 (10 MiB by default), it is renamed to `PATH.1`, replacing any older one, and a
 new file is started. This bounds the space it uses on `/perm` to about twice
@@ -335,12 +336,43 @@ A JA4 fingerprint identifies the **client software**, not the device: all
 current Chrome browsers share one fingerprint. JA4 rules work best for apps
 with a distinctive TLS stack, such as a smart TV's YouTube app.
 
+### Naming fingerprints
+
+A labels file gives JA4 fingerprints readable names. gk-fltr then adds
+`client=<label>` to its log lines and `client_label` to the block log, so you
+see `client="Chrome (QUIC)"` next to the hash. Labels only name software. They
+don't change what gets blocked.
+
+```
+# /perm/gk-fltr/labels.txt
+# <ja4 pattern> <label>; the first match applies
+q13d0313h3_55b375c5d22e_*  Chrome (QUIC)
+t13d1516h2_8daaf6152771_*  Chrome (TCP)
+*_55b375c5d22e_*           Chromium-family
+```
+
+Pass it with `-labels=/perm/gk-fltr/labels.txt`. Like the rules file, it is
+reloaded when it changes.
+
+To build the file, capture traffic from one client and let `inspect` record
+the fingerprints:
+
+```sh
+./bin/gk-fltr-amd64 inspect -labels labels.txt -learn "Kids' tablet YouTube app" capture.pcap
+```
+
+`-learn` appends each JA4 in the capture that no entry matches yet, as an
+exact fingerprint. A capture often holds background traffic from other apps
+too, so check the new lines. You can also widen an entry with `*` so it
+survives minor version changes, as in `*_55b375c5d22e_*` above.
+
 ## Flags
 
 | Flag | Default | Description |
 |---|---|---|
 | `-ip`, `-mac`, `-ja4` | | Rules; repeatable or comma-separated |
 | `-rules` | | Rules file; reloaded when it changes |
+| `-labels` | | File naming client software by JA4; reloaded when it changes |
 | `-allowance` | `0` | Daily allowance for rules and users without `allow=`; 0 means always blocked |
 | `-state` | | File where allowance use is kept across restarts |
 | `-reset-time`, `-timezone` | `00:00`, `Local` | When daily allowances reset |

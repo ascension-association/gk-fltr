@@ -44,6 +44,7 @@ type Decision struct {
 	Class  string           // nDPI classification, e.g. "TLS.YouTube"
 	Host   string           // SNI / host name, if any
 	JA4    string           // JA4 client fingerprint, if any
+	Label  string           // name of the client software, from Config.Label
 	Target bool             // classified as one of the blocked protocols
 	Block  bool             // Target, matched the policy, and no allowance left
 	Rule   string           // policy rule that matched
@@ -73,6 +74,9 @@ type Config struct {
 	// LookupMAC resolves a client IP to a MAC when the packet capture did
 	// not supply one (e.g. via /proc/net/arp). Optional.
 	LookupMAC func(netip.Addr) net.HardwareAddr
+	// Label names the client software with a JA4 fingerprint, or returns
+	// "" if unknown. Optional.
+	Label func(ja4 string) string
 	// OnDecision is called once per flow, outside the engine's lock.
 	OnDecision func(Decision)
 	// Admit reports whether a matched source still has allowance left
@@ -233,6 +237,9 @@ func (e *Engine) decide(f *flow, r ndpi.Result, info pktInfo, fromClient bool, d
 		Host:   r.Host,
 		JA4:    r.JA4,
 		Target: e.isTarget(r),
+	}
+	if d.JA4 != "" && e.cfg.Label != nil {
+		d.Label = e.cfg.Label(d.JA4)
 	}
 	if d.MAC == nil && e.cfg.LookupMAC != nil {
 		d.MAC = e.cfg.LookupMAC(f.tuple.Client.Addr())

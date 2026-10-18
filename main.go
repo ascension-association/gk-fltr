@@ -24,6 +24,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -33,6 +34,7 @@ import (
 	"github.com/ascension-association/gk-fltr/internal/blocklog"
 	"github.com/ascension-association/gk-fltr/internal/engine"
 	"github.com/ascension-association/gk-fltr/internal/firewall"
+	"github.com/ascension-association/gk-fltr/internal/labels"
 	"github.com/ascension-association/gk-fltr/internal/ndpi"
 	"github.com/ascension-association/gk-fltr/internal/netpkt"
 	"github.com/ascension-association/gk-fltr/internal/policy"
@@ -56,6 +58,7 @@ func (l *listFlag) Set(s string) error {
 type common struct {
 	ips, macs, ja4s listFlag
 	rulesFile       string
+	labelsFile      string
 	protos          string
 	license         string
 	maxPackets      int
@@ -68,6 +71,7 @@ func (c *common) register(fs *flag.FlagSet) {
 	fs.Var(&c.macs, "mac", "block sources with this MAC address (repeatable)")
 	fs.Var(&c.ja4s, "ja4", "block sources with this JA4 fingerprint; '*' wildcards allowed (repeatable)")
 	fs.StringVar(&c.rulesFile, "rules", "", "file with one rule per line: \"ip|mac|ja4 <value> [user=NAME] [allow=DURATION]\"; reloaded when it changes")
+	fs.StringVar(&c.labelsFile, "labels", "", "file naming client software by JA4: \"<ja4 pattern> <label>\" per line; reloaded when it changes")
 	fs.DurationVar(&c.allowance, "allowance", 0, "daily allowance for rules and users without allow= (0: always blocked)")
 	fs.StringVar(&c.protos, "protocols", "YouTube,YouTubeUpload,YouTubeKids", "comma-separated nDPI protocol names, or category:NAME for a whole category, to block (see: gk-fltr protocols)")
 	fs.StringVar(&c.license, "ndpi-license", "not-for-profit", "nDPI license mode: not-for-profit, for-profit-lgpl or for-profit-dual")
@@ -97,6 +101,13 @@ func (c *common) policy() (*policy.Policy, error) {
 		}
 	}
 	return b.Policy(), nil
+}
+
+func (c *common) labels() (*labels.Labels, error) {
+	if c.labelsFile == "" {
+		return nil, nil
+	}
+	return labels.ParseFile(c.labelsFile)
 }
 
 func (c *common) module() (*ndpi.Module, []uint16, error) {
@@ -141,6 +152,13 @@ func formatDecision(d engine.Decision) string {
 	}
 	if d.JA4 != "" {
 		s += " ja4=" + d.JA4
+	}
+	if d.Label != "" {
+		if strings.ContainsAny(d.Label, " \"") {
+			s += " client=" + strconv.Quote(d.Label)
+		} else {
+			s += " client=" + d.Label
+		}
 	}
 	if d.Rule != "" {
 		s += " rule=" + strings.ReplaceAll(d.Rule, " ", ":")
@@ -248,6 +266,12 @@ func run(args []string) error {
 	}
 	var curPol atomic.Pointer[policy.Policy]
 	curPol.Store(pol)
+	lbls, err := c.labels()
+	if err != nil {
+		return err
+	}
+	var curLabels atomic.Pointer[labels.Labels]
+	curLabels.Store(lbls)
 
 	tracker := quota.New(quota.Config{
 		Location:    loc,
@@ -295,6 +319,7 @@ func run(args []string) error {
 		MaxPackets: c.maxPackets,
 		FailClosed: !*failOpen,
 		LookupMAC:  lookupARP,
+		Label:      func(ja4 string) string { return curLabels.Load().Lookup(ja4) },
 		Admit: func(m policy.Match) bool {
 			return tracker.Remaining(m.Group, m.Allowance, time.Now()) > 0
 		},
@@ -396,6 +421,9 @@ func run(args []string) error {
 		failure = "fail-open"
 	}
 	log.Printf("gk-fltr running in %s mode, %s: %s; blocking %s", mname, failure, pol, c.protos)
+	if c.labelsFile != "" {
+		log.Printf("%d client labels from %s", lbls.Len(), c.labelsFile)
+	}
 
 	// Metered flows from before a restart are still open; keep counting them.
 	for _, f := range tracker.Flows() {
@@ -406,7 +434,7 @@ func run(args []string) error {
 	usageTick := time.NewTicker(*usageEvery)
 	defer usageTick.Stop()
 
-	rulesMtime := modTime(c.rulesFile)
+	rulesMtime, labelsMtime := modTime(c.rulesFile), modTime(c.labelsFile)
 	tick := time.NewTicker(15 * time.Second)
 	defer tick.Stop()
 	// Checking is cheap; keep any window without the table (e.g. after
@@ -471,6 +499,7 @@ func run(args []string) error {
 					Target: true, Block: true, Rule: cut.Info.Rule, User: cut.Info.User, Group: cut.Group,
 				}
 				d.MAC, _ = net.ParseMAC(cut.Info.MAC)
+				d.Label = curLabels.Load().Lookup(d.JA4)
 				d.Allowance, _ = curPol.Load().Allowance(cut.Group)
 				log.Print(formatDecision(d))
 				if blocks != nil {
@@ -498,6 +527,15 @@ func run(args []string) error {
 					log.Printf("reloaded rules: %s", p)
 				}
 			}
+			if mt := modTime(c.labelsFile); !mt.Equal(labelsMtime) {
+				labelsMtime = mt
+				if l, err := c.labels(); err != nil {
+					log.Printf("reloading labels: %v (keeping previous labels)", err)
+				} else {
+					curLabels.Store(l)
+					log.Printf("reloaded labels: %d client labels", l.Len())
+				}
+			}
 		}
 	}
 }
@@ -513,6 +551,7 @@ func blockEntry(d engine.Decision, mode firewall.Mode, now time.Time) blocklog.E
 		Class:      d.Class,
 		Host:       d.Host,
 		JA4:        d.JA4,
+		Label:      d.Label,
 		Mode:       mode.String(),
 	}
 	if d.Tuple.Proto == 6 {

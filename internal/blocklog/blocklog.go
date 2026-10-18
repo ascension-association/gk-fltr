@@ -23,6 +23,7 @@ type Entry struct {
 	Class      string    `json:"class"` // nDPI classification, e.g. "TLS.YouTube"
 	Host       string    `json:"host,omitempty"`
 	JA4        string    `json:"ja4,omitempty"`
+	Label      string    `json:"client_label,omitempty"` // client software, from the labels file
 	Rule       Rule      `json:"rule"`
 	User       string    `json:"user,omitempty"`
 	// Reason is "rule" for a rule without allowance, "allowance_exhausted"
