@@ -30,8 +30,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ben-auo/gk-network/internal/filter"
-	"github.com/ben-auo/gk-network/internal/steer"
+	"github.com/ascension-association/gk-network/internal/filter"
+	"github.com/ascension-association/gk-network/internal/steer"
 )
 
 func main() {
