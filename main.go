@@ -12,6 +12,8 @@
 //	gk-fltr [flags]                 run on the router
 //	gk-fltr inspect [flags] FILE    classify a pcap file offline
 //	gk-fltr protocols [QUERY...]    search the protocols nDPI can detect
+//	gk-fltr pair [flags]            show the app pairing QR code
+//	gk-fltr network [flags]         run gk-network (normally started by gk-fltr)
 package main
 
 import (
@@ -24,21 +26,26 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
 	_ "time/tzdata" // gokrazy has no zoneinfo files; needed for -timezone
 
+	"github.com/ascension-association/gk-fltr/internal/api"
 	"github.com/ascension-association/gk-fltr/internal/blocklog"
 	"github.com/ascension-association/gk-fltr/internal/engine"
 	"github.com/ascension-association/gk-fltr/internal/firewall"
 	"github.com/ascension-association/gk-fltr/internal/labels"
 	"github.com/ascension-association/gk-fltr/internal/ndpi"
 	"github.com/ascension-association/gk-fltr/internal/netpkt"
+	"github.com/ascension-association/gk-fltr/internal/network"
 	"github.com/ascension-association/gk-fltr/internal/policy"
 	"github.com/ascension-association/gk-fltr/internal/quota"
+	"github.com/ascension-association/gk-fltr/internal/settings"
 )
 
 // listFlag collects repeated flag values; comma-separated values are split.
@@ -59,6 +66,7 @@ type common struct {
 	ips, macs, ja4s listFlag
 	rulesFile       string
 	labelsFile      string
+	settingsFile    string // set by run when the API is enabled
 	protos          string
 	license         string
 	maxPackets      int
@@ -79,12 +87,30 @@ func (c *common) register(fs *flag.FlagSet) {
 	fs.BoolVar(&c.verbose, "v", false, "log every classified flow, not just blocked ones")
 }
 
+// policy builds the policy from the flags, the settings file and the rules
+// file.
 func (c *common) policy() (*policy.Policy, error) {
+	set := &settings.Settings{}
+	if c.settingsFile != "" {
+		var err error
+		if set, err = settings.Load(c.settingsFile); err != nil {
+			return nil, err
+		}
+	}
+	return c.policyWith(set)
+}
+
+// policyWith builds the policy with set in place of the settings file.
+func (c *common) policyWith(set *settings.Settings) (*policy.Policy, error) {
 	var b policy.Builder
 	if c.allowance < 0 || c.allowance > 24*time.Hour {
 		return nil, fmt.Errorf("invalid -allowance %s", c.allowance)
 	}
 	b.SetDefaultAllowance(c.allowance)
+	// The app's per-device rules go first, so they win over broader rules.
+	if err := set.Apply(&b); err != nil {
+		return nil, fmt.Errorf("settings: %w", err)
+	}
 	for _, kv := range []struct {
 		kind string
 		vals []string
@@ -202,6 +228,16 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "network" {
+		network.Main(os.Args[2:])
+		return
+	}
+	if len(os.Args) > 1 && os.Args[1] == "pair" {
+		if err := pair(os.Args[2:]); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 	if len(os.Args) > 1 && os.Args[1] == "inspect" {
 		if err := inspect(os.Args[2:]); err != nil {
 			log.Fatal(err)
@@ -233,9 +269,15 @@ func run(args []string) error {
 		timezone     = fs.String("timezone", "Local", "timezone for -reset-time, e.g. America/Denver (gokrazy's Local is UTC unless TZ is set)")
 		activeBytes  = fs.Uint64("active-bytes", 64<<10, "bytes a user's allowed connections must move in a usage interval for it to count as active")
 		usageEvery   = fs.Duration("usage-interval", time.Minute, "how often allowance use is measured; each active interval is charged in full")
+		apiAddrs     listFlag
+		apiDir       = fs.String("api-dir", "/perm/gk-fltr/api", "where the app API keeps its token, TLS certificate and settings.json")
+		apiURL       = fs.String("api-url", "", "URL the app uses to reach the API, for the pairing QR code (default: from the first -api address)")
+		networkMode  = fs.String("network", "auto", "run gk-network (ARP steering, safe-search DNS): auto (only on a one-interface box next to the router), on or off")
+		networkArgs  = fs.String("network-args", "", "flags for gk-network, space-separated, e.g. \"-targets=192.168.1.50,192.168.1.51 -ech\"")
 	)
+	fs.Var(&apiAddrs, "api", "address for the app API (HTTPS), or off; connections from outside the home network are refused (repeatable; default :8443)")
 	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "usage: gk-fltr [flags]\n       gk-fltr inspect [flags] FILE.pcap\n       gk-fltr protocols [flags] [QUERY...]\n\nflags:\n")
+		fmt.Fprintf(fs.Output(), "usage: gk-fltr [flags]\n       gk-fltr inspect [flags] FILE.pcap\n       gk-fltr protocols [flags] [QUERY...]\n       gk-fltr pair [flags]\n\nflags:\n")
 		fs.PrintDefaults()
 	}
 	fs.Parse(args)
@@ -256,13 +298,42 @@ func run(args []string) error {
 	if *usageEvery < time.Second {
 		return fmt.Errorf("invalid -usage-interval %s", *usageEvery)
 	}
+	if *networkMode != "auto" && *networkMode != "on" && *networkMode != "off" {
+		return fmt.Errorf("invalid -network %q (want auto, on or off)", *networkMode)
+	}
+
+	var creds *api.Credentials
+	home := &api.HomeNet{}
+	if apiAddrs, err = apiAddresses(apiAddrs); err != nil {
+		return err
+	}
+	if len(apiAddrs) > 0 {
+		var created bool
+		if creds, created, err = api.LoadCredentials(*apiDir); err != nil {
+			return fmt.Errorf("app API: %w", err)
+		}
+		c.settingsFile = filepath.Join(*apiDir, "settings.json")
+		if created {
+			if u, ok := pairingURL(*apiURL, apiAddrs, home); ok {
+				if err := printPairing(log.Writer(), creds, u, ""); err != nil {
+					return err
+				}
+			} else {
+				log.Printf("app API: new pairing token created; run gk-fltr pair once the LAN is up to show the QR code")
+			}
+		}
+	}
 
 	pol, err := c.policy()
 	if err != nil {
 		return err
 	}
 	if pol.Empty() {
-		log.Printf("warning: no rules configured; nothing will be blocked")
+		if len(apiAddrs) > 0 {
+			log.Printf("no rules yet; nothing is blocked until users are added in the app or a rules file")
+		} else {
+			log.Printf("warning: no rules configured; nothing will be blocked")
+		}
 	}
 	var curPol atomic.Pointer[policy.Policy]
 	curPol.Store(pol)
@@ -313,6 +384,8 @@ func run(args []string) error {
 
 	// fw is set once capture has started; no decisions happen before that.
 	var fw *firewall.Firewall
+	// apiSrv is set before capture starts, if the API is enabled.
+	var apiSrv *api.Server
 	eng := engine.New(engine.Config{
 		Module:     mod,
 		Protocols:  protos,
@@ -324,6 +397,9 @@ func run(args []string) error {
 			return tracker.Remaining(m.Group, m.Allowance, time.Now()) > 0
 		},
 		OnDecision: func(d engine.Decision) {
+			if apiSrv != nil {
+				apiSrv.Seen(d.Client.Addr(), d.MAC, d.Label, d.JA4, d.Host, time.Now())
+			}
 			if d.Metered {
 				if err := fw.Meter(d.Tuple.Proto, d.Client, d.Server); err != nil {
 					log.Printf("metering %s -> %s: %v", d.Client, d.Server, err)
@@ -370,6 +446,55 @@ func run(args []string) error {
 		},
 	}, pol)
 	defer eng.Close()
+
+	// setPolicy builds the policy, with set in place of the settings file
+	// unless nil, and puts it into effect. Both the reload loop and the API
+	// call it.
+	var polMu sync.Mutex
+	setPolicy := func(set *settings.Settings) (*policy.Policy, error) {
+		polMu.Lock()
+		defer polMu.Unlock()
+		var p *policy.Policy
+		var err error
+		if set != nil {
+			p, err = c.policyWith(set)
+		} else {
+			p, err = c.policy()
+		}
+		if err != nil {
+			return nil, err
+		}
+		eng.SetPolicy(p)
+		curPol.Store(p)
+		return p, nil
+	}
+
+	started := time.Now()
+	if creds != nil {
+		apiSrv = api.New(api.Config{
+			Credentials:  creds,
+			SettingsPath: c.settingsFile,
+			Tracker:      tracker,
+			Policy:       curPol.Load,
+			Apply: func(set *settings.Settings) error {
+				p, err := setPolicy(set)
+				if err == nil {
+					log.Printf("app API changed settings: %s", p)
+				}
+				return err
+			},
+			Status: func() api.Status {
+				return api.Status{
+					Mode:       fw.Mode().String(),
+					FailClosed: !*failOpen && fw.Mode() == firewall.ModeQueue,
+					Protocols:  strings.Split(c.protos, ","),
+					Started:    started,
+				}
+			},
+			BlockLog: *blockLog,
+			Home:     home.Contains,
+		})
+	}
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -421,8 +546,26 @@ func run(args []string) error {
 		failure = "fail-open"
 	}
 	log.Printf("gk-fltr running in %s mode, %s: %s; blocking %s", mname, failure, pol, c.protos)
+	if apiSrv != nil {
+		if err := apiSrv.Listen(apiAddrs); err != nil {
+			return err
+		}
+		defer apiSrv.Close()
+		log.Printf("app API listening on %s (pair with: gk-fltr pair -api-dir=%s)", apiAddrs.String(), *apiDir)
+	}
 	if c.labelsFile != "" {
 		log.Printf("%d client labels from %s", lbls.Len(), c.labelsFile)
+	}
+	if *networkMode != "off" {
+		netDone := make(chan struct{})
+		go func() {
+			defer close(netDone)
+			superviseNetwork(ctx, *networkMode == "auto", strings.Fields(*networkArgs))
+		}()
+		defer func() {
+			cancel()
+			<-netDone
+		}()
 	}
 
 	// Metered flows from before a restart are still open; keep counting them.
@@ -435,6 +578,7 @@ func run(args []string) error {
 	defer usageTick.Stop()
 
 	rulesMtime, labelsMtime := modTime(c.rulesFile), modTime(c.labelsFile)
+	settingsMtime := modTime(c.settingsFile)
 	tick := time.NewTicker(15 * time.Second)
 	defer tick.Stop()
 	// Checking is cheap; keep any window without the table (e.g. after
@@ -475,6 +619,10 @@ func run(args []string) error {
 				log.Printf("allowance %s: %s used up; blocking its connections until %s",
 					groupName(g), fmtDur(a), tracker.PeriodStart(now).AddDate(0, 0, 1).Format("Mon 15:04 MST"))
 			}
+			for g := range res.Paused {
+				log.Printf("allowance %s: paused; blocking its connections until %s",
+					groupName(g), tracker.PeriodStart(now).AddDate(0, 0, 1).Format("Mon 15:04 MST"))
+			}
 			for _, cut := range res.Cut {
 				if err := fw.Block(cut.Proto, cut.Client, cut.Server); err != nil {
 					log.Printf("blocking %s -> %s: %v", cut.Client, cut.Server, err)
@@ -505,6 +653,9 @@ func run(args []string) error {
 				if blocks != nil {
 					e := blockEntry(d, fw.Mode(), now)
 					e.Reason = "allowance_exhausted"
+					if cut.Paused {
+						e.Reason = "paused"
+					}
 					if err := blocks.Write(e); err != nil {
 						log.Printf("writing block log: %v", err)
 					}
@@ -517,13 +668,12 @@ func run(args []string) error {
 			}
 		case now := <-tick.C:
 			eng.Expire(now)
-			if mt := modTime(c.rulesFile); !mt.Equal(rulesMtime) {
-				rulesMtime = mt
-				if p, err := c.policy(); err != nil {
+			rmt, smt := modTime(c.rulesFile), modTime(c.settingsFile)
+			if !rmt.Equal(rulesMtime) || !smt.Equal(settingsMtime) {
+				rulesMtime, settingsMtime = rmt, smt
+				if p, err := setPolicy(nil); err != nil {
 					log.Printf("reloading rules: %v (keeping previous rules)", err)
 				} else {
-					eng.SetPolicy(p)
-					curPol.Store(p)
 					log.Printf("reloaded rules: %s", p)
 				}
 			}

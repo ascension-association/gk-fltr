@@ -80,7 +80,8 @@ type Config struct {
 	// OnDecision is called once per flow, outside the engine's lock.
 	OnDecision func(Decision)
 	// Admit reports whether a matched source still has allowance left
-	// (only called for rules with an allowance). If nil, nothing is admitted.
+	// (only called for matches with a Group, i.e. users and rules with an
+	// allowance). If nil, nothing is admitted.
 	Admit func(policy.Match) bool
 }
 
@@ -248,7 +249,8 @@ func (e *Engine) decide(f *flow, r ndpi.Result, info pktInfo, fromClient bool, d
 		if m, ok := e.policy.Load().Match(f.tuple.Client.Addr(), d.MAC, d.JA4); ok {
 			d.Rule, d.User, d.Group, d.Allowance = m.Rule, m.User, m.Group, m.Allowance
 			d.Block = true
-			if m.Allowance > 0 && e.cfg.Admit != nil && e.cfg.Admit(m) {
+			// Users are asked even with no allowance: they may have extra time.
+			if m.Group != "" && e.cfg.Admit != nil && e.cfg.Admit(m) {
 				d.Block, d.Metered = false, true
 			}
 		}

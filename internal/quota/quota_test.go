@@ -127,3 +127,65 @@ func TestSaveLoad(t *testing.T) {
 		t.Errorf("next day: used = %v, want 0", got)
 	}
 }
+
+func TestExtraAndPause(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	tr := New(Config{Location: denver, Interval: time.Minute, ActiveBytes: 1, StatePath: path})
+	allow := allowances(map[string]time.Duration{"user:alice": time.Minute, "user:bob": 0})
+	now := time.Date(2026, 10, 12, 15, 0, 0, 0, denver)
+
+	// bob has no allowance; extra time lets him in, taking it back doesn't
+	// go below zero.
+	if r := tr.Remaining("user:bob", 0, now); r != 0 {
+		t.Fatalf("bob remaining = %v, want 0", r)
+	}
+	if e := tr.AddExtra("user:bob", 30*time.Minute, now); e != 30*time.Minute {
+		t.Fatalf("AddExtra = %v", e)
+	}
+	if e := tr.AddExtra("user:bob", -time.Hour, now); e != 0 {
+		t.Fatalf("AddExtra(-1h) = %v, want 0", e)
+	}
+	tr.AddExtra("user:alice", time.Minute, now)
+	if r := tr.Remaining("user:alice", time.Minute, now); r != 2*time.Minute {
+		t.Fatalf("alice remaining = %v, want 2m with extra", r)
+	}
+
+	// With extra time, alice is cut after 2 active minutes, not 1.
+	tr.Track(alicePhone, "user:alice", Info{})
+	now = now.Add(time.Minute)
+	if r := tr.Tick(now, map[Flow]uint64{alicePhone: 10}, allow); len(r.Cut) != 0 {
+		t.Fatalf("minute 1 cut %v", r.Cut)
+	}
+	now = now.Add(time.Minute)
+	if r := tr.Tick(now, map[Flow]uint64{alicePhone: 20}, allow); len(r.Cut) != 1 || r.Exhausted["user:alice"] != 2*time.Minute {
+		t.Fatalf("minute 2: cut %v exhausted %v, want alice cut at 2m", r.Cut, r.Exhausted)
+	}
+
+	// Pausing leaves no time and cuts open flows at the next tick.
+	tr.AddExtra("user:alice", time.Hour, now)
+	tr.Track(alicePhone, "user:alice", Info{})
+	tr.SetPaused("user:alice", true, now)
+	if r := tr.Remaining("user:alice", time.Minute, now); r != 0 {
+		t.Fatalf("paused remaining = %v", r)
+	}
+	now = now.Add(time.Minute)
+	r := tr.Tick(now, map[Flow]uint64{alicePhone: 0}, allow)
+	if len(r.Cut) != 1 || !r.Cut[0].Paused || !r.Paused["user:alice"] || len(r.Exhausted) != 0 {
+		t.Fatalf("paused tick = %+v", r)
+	}
+
+	// Extra time and pauses survive a restart, but not the daily reset.
+	if err := tr.Save(); err != nil {
+		t.Fatal(err)
+	}
+	tr2 := New(Config{Location: denver, Interval: time.Minute, StatePath: path})
+	if err := tr2.Load(now); err != nil {
+		t.Fatal(err)
+	}
+	if u := tr2.Usage("user:alice", now); !u.Paused || u.Extra != time.Hour+time.Minute || u.Used != 2*time.Minute {
+		t.Fatalf("after Load: %+v", u)
+	}
+	if u := tr2.Usage("user:alice", now.Add(24*time.Hour)); u != (Usage{}) {
+		t.Fatalf("next day: %+v, want zero", u)
+	}
+}

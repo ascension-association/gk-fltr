@@ -1,0 +1,605 @@
+// Package network is gk-network, a gokrazy appliance that enforces
+// parental-control network rules on your own LAN without replacing your
+// existing router. It runs as its own program (cmd/gk-network) or as
+// "gk-fltr network", started by gk-fltr (see Supervisor).
+//
+// It keeps your router as the DHCP server and gateway, and uses targeted ARP
+// steering to pull selected client devices' traffic through this host, which
+// forwards it on to the real gateway. Because forwarding stays on, managed
+// devices keep full connectivity; the point is to put a filtering choke point
+// in the path, not to disrupt the network.
+//
+// Only operate this on a network you own and administer, against devices you
+// are responsible for (e.g. your household's). It is not a tool for use on
+// networks or devices that are not yours.
+//
+// Usage:
+//
+//	gk-network -i eth0 -gw 192.168.1.1 -targets 192.168.1.50,192.168.1.51
+package network
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log"
+	"net"
+	"net/netip"
+	"os"
+	"os/signal"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"syscall"
+	"time"
+
+	"github.com/ascension-association/gk-fltr/internal/filter"
+	"github.com/ascension-association/gk-fltr/internal/netinfo"
+	"github.com/ascension-association/gk-fltr/internal/steer"
+)
+
+// Main runs gk-network with the given command-line arguments. It exits the
+// process on fatal errors.
+func Main(args []string) {
+	flag := flag.NewFlagSet("gk-network", flag.ExitOnError)
+	supervised := flag.Bool("supervised", false, "started by gk-fltr: log to the control socket instead of stderr")
+	iface := flag.String("i", "eth0", "LAN interface")
+	gw := flag.String("gw", "auto", `existing gateway/router IP, or "auto" to detect the default route`)
+	targetsCSV := flag.String("targets", "all", `comma-separated client IPs to manage, or "all" to steer every LAN host, including ones that join later`)
+	rescan := flag.Duration("rescan", 10*time.Minute, `with -targets=all, how often to scan the LAN for hosts that joined without being noticed (0 disables; new hosts are also picked up as they announce themselves)`)
+	dnsAddr := flag.String("dns", ":53", `address for the safe-search DNS resolver, or "" to disable`)
+	// Default to Safe Surfer's family-filtering resolvers (safesurfer.io).
+	upstream1 := flag.String("upstream", "4.150.168.57", "primary upstream DNS server (IPv4, :53 assumed if no port)")
+	upstream2 := flag.String("upstream2", "104.197.28.121", "secondary/failover upstream DNS server (IPv4, :53 assumed if no port)")
+	blocklistsCSV := flag.String("blocklists", "", "comma-separated blocklist URLs for DNS sinkholing (default: OISD Small + OISD NSFW + HaGeZi Anti-Piracy + HaGeZi Gambling + HaGeZi NSFW + StevenBlack Fake News + HaGeZi Native Trackers + HaGeZi Pop-Up Ads + HaGeZi Fake + ShadowWhisperer Gambling/Malware/Remote/Risk/Scam/Shock/Typo)")
+	blockCSV := flag.String("block", "", "comma-separated domains to always sinkhole (added to the built-in defaults)")
+	allowlistsCSV := flag.String("allowlists", "", "comma-separated allowlist URLs; listed domains are never sinkholed (default: ShadowWhisperer Whitelist + BadBlock captive/certs/time/push/safe-browsing/captcha; \"none\" disables)")
+	allowCSV := flag.String("allow", "", "comma-separated domains to never sinkhole (allowlist; added to the built-in defaults)")
+	blockNFT := flag.Bool("block-nft", false, "install nftables named sets (blocked_v4/blocked_v6) and a forward-path drop rule")
+	allowIPsCSV := flag.String("allow-ips", "", "comma-separated IPs never blocked by the IP range lists (added to the built-in defaults)")
+	blockIPsCSV := flag.String("block-ips", "", "comma-separated IPs to seed into the nftables block sets (implies -block-nft)")
+	ipBlocklistsCSV := flag.String("ip-blocklists", "", "comma-separated CIDR blocklist URLs (gz ok) for nftables range blocking (default: DoH + malicious-source lists; \"none\" disables)")
+	blockCountries := flag.Bool("block-countries", true, "block forwarded traffic to IP ranges of the full/partial U.S. entry-suspension countries (CRS IN12631; uses nftables)")
+	allowIPv6 := flag.Bool("ipv6", false, "allow IPv6 (disabled by default, since it can bypass IPv4 filtering)")
+	allowECH := flag.Bool("ech", false, "allow TLS 1.3 Encrypted Client Hello (blocked by default; it hides SNI from filtering)")
+	blockEncDNS := flag.Bool("block-encrypted-dns", true, "block DoT/DoQ (port 853), known DoH endpoints, and Tor relay ports (9001/9030) so clients can't bypass filtering (uses nftables)")
+	blockVPN := flag.Bool("block-vpn", true, "block VPNs: WireGuard handshakes on any UDP port, default VPN/mesh protocol ports, VPN provider/tool domains, and commercial VPN server IP ranges (uses nftables)")
+	redirectDNS := flag.Bool("redirect-dns", true, "transparently redirect steered clients' port-53 DNS to this resolver (requires the resolver on :53; uses nftables)")
+	refresh := flag.Duration("refresh", 12*time.Hour, "how often to re-fetch domain and IP blocklists (0 disables)")
+	checkCSV := flag.String("check", "", "comma-separated domains or IPs: report whether the configured lists block each one and which lists include it, then exit (no steering)")
+	flag.Parse(args)
+
+	// The DNS redirect requires the resolver to be listening on port 53.
+	dnsOn53 := false
+	if *dnsAddr != "" {
+		if _, p, err := net.SplitHostPort(*dnsAddr); err == nil && p == "53" {
+			dnsOn53 = true
+		}
+	}
+	doRedirectDNS := *redirectDNS && dnsOn53
+
+	// CIDR range lists: -ip-blocklists (the defaults when empty, nothing when
+	// "none"), plus the VPN server ranges and suspended-country ranges unless
+	// -block-vpn=false / -block-countries=false.
+	var ipURLs []string // kept for periodic refresh
+	switch v := strings.TrimSpace(*ipBlocklistsCSV); {
+	case strings.EqualFold(v, "none"):
+	case v == "":
+		ipURLs = append(ipURLs, filter.DefaultIPBlocklists...)
+	default:
+		for _, u := range strings.Split(v, ",") {
+			if u = strings.TrimSpace(u); u != "" {
+				ipURLs = append(ipURLs, u)
+			}
+		}
+	}
+	if *blockVPN {
+		ipURLs = append(ipURLs, filter.VPNIPBlocklists...)
+	}
+	if *blockCountries {
+		ipURLs = append(ipURLs, filter.CountryBlocklistURLs(filter.SuspendedCountries, *allowIPv6)...)
+	}
+	ipBlockEnabled := len(ipURLs) > 0
+	var seedIPs []netip.Addr
+	for _, s := range strings.Split(*blockIPsCSV, ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		ip, err := netip.ParseAddr(s)
+		if err != nil {
+			log.Fatalf("invalid -block-ips entry %q", s)
+		}
+		seedIPs = append(seedIPs, ip)
+	}
+
+	// IP allowlist (never blocked by the range lists): built-in defaults plus
+	// -allow-ips entries.
+	allowIPs := append([]netip.Addr(nil), filter.DefaultAllowIPs...)
+	for _, s := range strings.Split(*allowIPsCSV, ",") {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue
+		}
+		ip, err := netip.ParseAddr(s)
+		if err != nil {
+			log.Fatalf("invalid -allow-ips entry %q", s)
+		}
+		allowIPs = append(allowIPs, ip)
+	}
+
+	// DNS domain blocklist (OISD Small + NSFW + HaGeZi Anti-Piracy + Gambling + NSFW + StevenBlack Fake News + HaGeZi Native Trackers + HaGeZi Pop-Up Ads + HaGeZi Fake + ShadowWhisperer Gambling/Malware/Remote/Risk/Scam/Shock/Typo by default).
+	var dnsURLs []string
+	for _, u := range strings.Split(*blocklistsCSV, ",") {
+		if u = strings.TrimSpace(u); u != "" {
+			dnsURLs = append(dnsURLs, u)
+		}
+	}
+	// Individually blocked domains (built-in defaults plus -block entries),
+	// kept across refreshes.
+	domainSources := []filter.DomainSource{{Name: "built-in block domains", Domains: filter.DefaultBlockDomains}}
+	var userBlock []string
+	for _, d := range strings.Split(*blockCSV, ",") {
+		if d = strings.TrimSpace(d); d != "" {
+			userBlock = append(userBlock, d)
+		}
+	}
+	domainSources = append(domainSources, filter.DomainSource{Name: "-block", Domains: userBlock})
+	if *blockEncDNS {
+		// Sinkhole bypass bootstrap domains (Firefox DoH canary, Brave Tor,
+		// Oblivious DoH, Tor Project).
+		domainSources = append(domainSources, filter.DomainSource{Name: "built-in bypass domains (-block-encrypted-dns)", Domains: filter.DefaultBypassDomains})
+	}
+	if *blockVPN {
+		// VPN provider/tool domains: the bypass list on top of the configured
+		// (or default) domain lists, plus individual domains.
+		if len(dnsURLs) == 0 {
+			dnsURLs = append(dnsURLs, filter.DefaultBlocklists...)
+		}
+		dnsURLs = append(dnsURLs, filter.VPNDomainBlocklists...)
+		domainSources = append(domainSources, filter.DomainSource{Name: "VPN tool domains (-block-vpn)", Domains: filter.VPNDomains})
+	}
+	// Force-blocked domains win over the allowlists; they are not part of
+	// extra, since Blocklist keeps them across reloads itself.
+	domainSources = append(domainSources, filter.DomainSource{Name: "built-in force-block domains", Domains: filter.DefaultForceBlockDomains, Force: true})
+	var extra []string
+	for _, src := range domainSources {
+		if !src.Force {
+			extra = append(extra, src.Domains...)
+		}
+	}
+	// Allowlist (never sinkholed): -allowlists (the defaults when empty,
+	// nothing when "none"), plus the built-in defaults and -allow entries.
+	var allowURLs []string
+	switch v := strings.TrimSpace(*allowlistsCSV); {
+	case strings.EqualFold(v, "none"):
+	case v == "":
+		allowURLs = append(allowURLs, filter.DefaultAllowlists...)
+	default:
+		for _, u := range strings.Split(v, ",") {
+			if u = strings.TrimSpace(u); u != "" {
+				allowURLs = append(allowURLs, u)
+			}
+		}
+	}
+	var userAllow []string
+	for _, d := range strings.Split(*allowCSV, ",") {
+		if d = strings.TrimSpace(d); d != "" {
+			userAllow = append(userAllow, d)
+		}
+	}
+	allowSources := []filter.DomainSource{
+		{Name: "built-in allowlist", Domains: filter.DefaultAllowDomains},
+		{Name: "-allow", Domains: userAllow},
+	}
+	allow := append(append([]string(nil), filter.DefaultAllowDomains...), userAllow...)
+
+	if *checkCSV != "" {
+		var checkDNSURLs []string
+		if *dnsAddr != "" {
+			checkDNSURLs = dnsURLs
+			if len(checkDNSURLs) == 0 {
+				checkDNSURLs = filter.DefaultBlocklists
+			}
+		} else {
+			domainSources = nil
+		}
+		ipSources := []filter.IPSource{{Name: "-block-ips", Addrs: seedIPs}}
+		if *blockEncDNS {
+			ipSources = append(ipSources, filter.IPSource{Name: "DoH endpoints, port 443 only (-block-encrypted-dns)", Addrs: filter.DefaultDoHEndpoints})
+		}
+		log.Print("check: fetching lists...")
+		c := filter.NewChecker(filter.CheckerConfig{
+			DomainURLs:    checkDNSURLs,
+			DomainSources: domainSources,
+			AllowURLs:     allowURLs,
+			AllowSources:  allowSources,
+			IPURLs:        ipURLs,
+			IPSources:     ipSources,
+			AllowIPs:      allowIPs,
+		})
+		runCheck(*checkCSV, c, *dnsAddr != "", *allowIPv6)
+		return
+	}
+
+	// Only one gk-network may steer the LAN. The control socket enforces that
+	// and lets gk-fltr stop this one and read its log.
+	ctl, err := Listen(SocketName)
+	if errors.Is(err, ErrRunning) {
+		log.Print("gk-network is already running")
+		os.Exit(ExitRunning)
+	}
+	if err != nil {
+		log.Fatalf("control socket: %v", err)
+	}
+	if *supervised {
+		log.SetOutput(ctl)
+		// Let gk-fltr attach first, so it sees errors from startup.
+		select {
+		case <-ctl.Attached():
+		case <-time.After(5 * time.Second):
+		}
+	}
+	// Until steering starts, nothing needs restoring: a stop request just
+	// exits. After that, it stops steering and restores ARP caches.
+	var steering atomic.Bool
+	stop := make(chan struct{})
+	go func() {
+		sig := make(chan os.Signal, 1)
+		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
+		select {
+		case <-sig:
+		case <-ctl.Stopping():
+		}
+		if !steering.Load() {
+			log.Print("stopping")
+			os.Exit(0)
+		}
+		log.Print("stopping, restoring ARP caches...")
+		close(stop)
+	}()
+
+	// Resolve the existing gateway: either the default route, or an explicit IP.
+	var gwIP netip.Addr
+	if *gw == "auto" {
+		var err error
+		gwIP, err = netinfo.Gateway(*iface)
+		if err != nil {
+			log.Fatalf("auto gateway: %v", err)
+		}
+		log.Printf("discovered existing gateway %s on %s", gwIP, *iface)
+	} else {
+		var err error
+		gwIP, err = netip.ParseAddr(*gw)
+		if err != nil {
+			log.Fatalf("invalid gateway IP %q", *gw)
+		}
+	}
+
+	// Resolve the client set: either "all" discovered hosts, or an explicit list.
+	var targets []netip.Addr
+	var discovered []steer.Target
+	all := strings.TrimSpace(*targetsCSV) == "all"
+	if all {
+		var err error
+		discovered, err = steer.DiscoverClients(*iface, gwIP, 0)
+		if err != nil {
+			log.Fatalf("discover clients: %v", err)
+		}
+	} else {
+		for _, s := range strings.Split(*targetsCSV, ",") {
+			s = strings.TrimSpace(s)
+			if s == "" {
+				continue
+			}
+			ip, err := netip.ParseAddr(s)
+			if err != nil {
+				log.Fatalf("invalid target IP %q", s)
+			}
+			targets = append(targets, ip)
+		}
+	}
+	if !all && len(targets) == 0 {
+		log.Fatal("no target IPs given")
+	}
+
+	if err := filter.EnableForwarding(); err != nil {
+		log.Fatalf("%v", err)
+	}
+	if !filter.ForwardingEnabled() {
+		log.Fatal("ip_forward did not take effect; refusing to steer (would black-hole clients)")
+	}
+	log.Print("ip forwarding enabled")
+	// Without this, the kernel tells steered clients to bypass this host.
+	if err := filter.DisableRedirects(*iface); err != nil {
+		log.Fatalf("%v", err)
+	}
+	if !filter.RedirectsDisabled(*iface) {
+		log.Fatal("send_redirects did not take effect; refusing to steer (clients would be redirected past the filters)")
+	}
+	log.Print("ICMP redirects disabled")
+
+	// IPv6 is disabled by default: it's a common way to bypass IPv4-based
+	// filtering (ARP steering only covers IPv4). Disabling it on the host now
+	// also covers the DNS resolver and nft rules configured below.
+	if !*allowIPv6 {
+		if err := filter.DisableIPv6OnHost(*iface); err != nil {
+			log.Printf("ipv6: %v (continuing; DNS AAAA stripping still applies)", err)
+		} else {
+			log.Print("ipv6: disabled on appliance")
+		}
+	}
+
+	// nftables IP blocking (named sets + forward drop rule). Encrypted-DNS
+	// blocking and IPv6 forward-drop also need these rules, so enable nft when
+	// any of them is requested.
+	needNFT := *blockNFT || *blockIPsCSV != "" || *blockEncDNS || *blockVPN || ipBlockEnabled || doRedirectDNS
+	var blocker *filter.IPBlocker
+	if needNFT {
+		var err error
+		blocker, err = filter.NewIPBlocker("gknetwork")
+		if err != nil {
+			log.Fatalf("nft block: %v", err)
+		}
+		if len(seedIPs) > 0 {
+			if err := blocker.AddIPs(seedIPs); err != nil {
+				log.Fatalf("seed block set: %v", err)
+			}
+			log.Printf("nft: seeded %d blocked IP(s)", len(seedIPs))
+		}
+		if !*allowIPv6 {
+			if err := blocker.DropForwardedIPv6(); err != nil {
+				log.Fatalf("nft ipv6 drop: %v", err)
+			}
+		}
+		if *blockEncDNS {
+			if err := blocker.BlockDoT(); err != nil {
+				log.Fatalf("nft block DoT: %v", err)
+			}
+			if err := blocker.BlockDoH(filter.DefaultDoHEndpoints); err != nil {
+				log.Fatalf("nft block DoH: %v", err)
+			}
+			if err := blocker.BlockTor(); err != nil {
+				log.Fatalf("nft block Tor: %v", err)
+			}
+		}
+		if *blockVPN {
+			if err := blocker.BlockVPN(); err != nil {
+				log.Fatalf("nft block VPN: %v", err)
+			}
+		}
+		if doRedirectDNS {
+			if err := blocker.RedirectDNS(); err != nil {
+				log.Fatalf("nft redirect dns: %v", err)
+			}
+		}
+		if ipBlockEnabled {
+			blocker.SetAllowIPs(allowIPs)
+			prefixes := filter.LoadIPBlocklists(ipURLs)
+			if len(prefixes) > 0 {
+				if err := blocker.BlockCIDRs(prefixes); err != nil {
+					log.Fatalf("nft block CIDRs: %v", err)
+				}
+			}
+		}
+	}
+
+	// Safe-search DNS resolver. Steered clients that use this host for DNS get
+	// forced-safe answers for the covered sites, blocked domains sinkholed, and
+	// normal resolution for the rest.
+	var bl *filter.Blocklist
+	if *dnsAddr != "" {
+		ss := filter.NewSafeSearch(withDNSPort(*upstream1), withDNSPort(*upstream2))
+		ss.SetBlockIPv6(!*allowIPv6)
+		ss.SetAllowECH(*allowECH)
+
+		bl = filter.NewBlocklist()
+		for _, d := range allow {
+			bl.Allow(d)
+		}
+		for _, d := range filter.DefaultForceBlockDomains {
+			bl.ForceBlock(d)
+		}
+		bl.LoadAllowlists(allowURLs)
+		bl.LoadDefaults(dnsURLs) // uses defaults when dnsURLs is empty
+		for _, d := range extra {
+			bl.Add(d)
+		}
+		ss.SetBlocklist(bl)
+
+		go func() {
+			if err := ss.ListenAndServe(*dnsAddr); err != nil {
+				log.Fatalf("dns resolver: %v", err)
+			}
+		}()
+	}
+
+	logTotals(bl, blocker, len(seedIPs))
+
+	// Periodically re-fetch both blocklist layers so daily-updated lists stay
+	// current without a restart.
+	if *refresh > 0 && (bl != nil || (blocker != nil && ipBlockEnabled)) {
+		go func() {
+			t := time.NewTicker(*refresh)
+			defer t.Stop()
+			for range t.C {
+				if bl != nil {
+					bl.Reload(dnsURLs, allowURLs, extra, allow)
+				}
+				if blocker != nil && ipBlockEnabled {
+					if prefixes := filter.LoadIPBlocklists(ipURLs); len(prefixes) > 0 {
+						if err := blocker.ReplaceCIDRs(prefixes); err != nil {
+							log.Printf("refresh: %v", err)
+						}
+					}
+				}
+				logTotals(bl, blocker, len(seedIPs))
+			}
+		}()
+		log.Printf("blocklist refresh every %s", *refresh)
+	}
+
+	s, err := steer.New(steer.Config{
+		Interface: *iface,
+		Gateway:   gwIP,
+		Targets:   targets,
+		Known:     discovered,
+	})
+	if err != nil {
+		log.Fatalf("steer: %v", err)
+	}
+	defer s.Close()
+
+	if all {
+		// Steer hosts that join later too: at once when they announce
+		// themselves, and by a periodic scan for any that were missed.
+		go s.Watch()
+		if *rescan > 0 {
+			go func() {
+				t := time.NewTicker(*rescan)
+				defer t.Stop()
+				for range t.C {
+					found, err := steer.DiscoverClients(*iface, gwIP, 0)
+					if err != nil {
+						log.Printf("rescan: %v", err)
+						continue
+					}
+					for _, c := range found {
+						s.Add(c.IP, c.MAC)
+					}
+				}
+			}()
+		}
+	}
+
+	log.Printf("steering %d client(s) via %s through %s", s.Len(), *iface, gwIP)
+	steering.Store(true)
+	s.Run(stop)
+	log.Print("done")
+	ctl.Close()
+}
+
+// logTotals logs one summary line with everything currently blocked: domains
+// in the DNS sinkhole, plus IP ranges and individual IPs in the nftables sets.
+// bl and blocker may be nil when that layer is off.
+func logTotals(bl *filter.Blocklist, blocker *filter.IPBlocker, seedIPs int) {
+	domains := 0
+	if bl != nil {
+		domains = bl.Len()
+	}
+	var ranges4, ranges6 int
+	var addrs4 uint64
+	if blocker != nil {
+		ranges4, ranges6, addrs4 = blocker.CIDRStats()
+	}
+	log.Printf("blocking %s domains, %s IP ranges (%s IPv4 addresses), %s individual IPs",
+		commas(uint64(domains)), commas(uint64(ranges4+ranges6)), commas(addrs4), commas(uint64(seedIPs)))
+}
+
+// commas formats n with thousands separators.
+func commas(n uint64) string {
+	s := strconv.FormatUint(n, 10)
+	for i := len(s) - 3; i > 0; i -= 3 {
+		s = s[:i] + "," + s[i:]
+	}
+	return s
+}
+
+// runCheck prints, for each comma-separated domain or IP in targets, whether
+// the configuration c was built from blocks it and which lists include it.
+// Domains that are not sinkholed are also resolved and their addresses
+// checked against the IP lists.
+func runCheck(targets string, c *filter.Checker, dnsOn, allowIPv6 bool) {
+	for _, t := range strings.Split(targets, ",") {
+		if t = strings.TrimSpace(t); t == "" {
+			continue
+		}
+		if ip, err := netip.ParseAddr(t); err == nil {
+			checkIP(t, ip, c, allowIPv6)
+			continue
+		}
+
+		name := strings.ToLower(strings.TrimSuffix(t, "."))
+		hits, allowedBy := c.Domain(name)
+		blocked := len(hits) > 0 && len(allowedBy) == 0
+		for _, h := range hits {
+			blocked = blocked || h.Forced
+		}
+		switch {
+		case !dnsOn:
+			fmt.Printf("%s: DNS filtering disabled (-dns \"\")\n", name)
+		case blocked:
+			fmt.Printf("%s: BLOCKED (DNS sinkhole)\n", name)
+		case len(hits) > 0:
+			fmt.Printf("%s: allowed by allowlist:\n", name)
+			printHits(allowedBy)
+			fmt.Println("  despite:")
+		default:
+			if safe, ok := filter.SafeSearchHost(name); ok {
+				fmt.Printf("%s: not blocked; answered with %s (safe search)\n", name, safe)
+			} else {
+				fmt.Printf("%s: not blocked by DNS\n", name)
+			}
+		}
+		printHits(hits)
+		if dnsOn && blocked {
+			continue // clients never get an address to connect to
+		}
+
+		// Safe-search sites are answered with the safe host's addresses.
+		lookup := name
+		if safe, ok := filter.SafeSearchHost(name); ok && dnsOn {
+			lookup = safe
+		}
+		addrs, err := net.DefaultResolver.LookupNetIP(context.Background(), "ip", lookup)
+		if err != nil {
+			fmt.Printf("  resolve: %v\n", err)
+			continue
+		}
+		for _, ip := range addrs {
+			checkIP("  resolves to "+ip.Unmap().String(), ip, c, allowIPv6)
+		}
+	}
+}
+
+// checkIP prints whether forwarded traffic to ip is dropped, labeled label.
+func checkIP(label string, ip netip.Addr, c *filter.Checker, allowIPv6 bool) {
+	ip = ip.Unmap()
+	switch {
+	case ip.Is6() && !allowIPv6:
+		fmt.Printf("%s: BLOCKED (all forwarded IPv6 is dropped; -ipv6 allows it)\n", label)
+	case filter.IsReservedAddr(ip):
+		fmt.Printf("%s: not blocked (reserved/private range, never blocked)\n", label)
+	default:
+		hits, allowed := c.IP(ip)
+		switch {
+		case len(hits) > 0:
+			fmt.Printf("%s: BLOCKED (IP)\n", label)
+			printHits(hits)
+		case len(allowed) > 0:
+			fmt.Printf("%s: allowed by IP allowlist, despite:\n", label)
+			printHits(allowed)
+		default:
+			fmt.Printf("%s: not blocked by IP\n", label)
+		}
+	}
+}
+
+func printHits(hits []filter.Hit) {
+	for _, h := range hits {
+		fmt.Printf("    %s (%s)\n", h.List, h.Entry)
+	}
+}
+
+// withDNSPort returns addr unchanged if it already carries a port, otherwise it
+// appends the standard DNS port 53. Empty input stays empty (ignored upstream).
+func withDNSPort(addr string) string {
+	if addr == "" {
+		return ""
+	}
+	if _, _, err := net.SplitHostPort(addr); err == nil {
+		return addr
+	}
+	return net.JoinHostPort(addr, "53")
+}

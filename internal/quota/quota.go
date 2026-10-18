@@ -5,7 +5,8 @@
 // at a fixed interval. Each interval in which a group's flows moved at least
 // ActiveBytes counts as one interval of use. Once a group's use reaches its
 // allowance, Tick returns the group's flows so they can be cut off. Use
-// resets daily at a fixed local time.
+// resets daily at a fixed local time, as do extra time granted for the day
+// (AddExtra) and pauses (SetPaused).
 package quota
 
 import (
@@ -37,11 +38,13 @@ type Info struct {
 	User  string `json:"user,omitempty"`
 }
 
-// Cutoff is a metered flow whose group has used up its allowance.
+// Cutoff is a metered flow whose group has used up its allowance or was
+// paused.
 type Cutoff struct {
 	Flow
-	Group string
-	Info  Info
+	Group  string
+	Info   Info
+	Paused bool
 }
 
 // TickResult reports what a Tick did.
@@ -49,8 +52,10 @@ type TickResult struct {
 	Reset   bool                     // a new day started; all use was cleared
 	Charged map[string]time.Duration // groups charged this tick -> use so far today
 	Cut     []Cutoff                 // flows to block
-	// Exhausted lists groups that ran out this tick, with their allowance.
+	// Exhausted lists groups that ran out this tick, with their allowance
+	// including extra time.
 	Exhausted map[string]time.Duration
+	Paused    map[string]bool // paused groups whose flows were cut this tick
 }
 
 // Config configures a Tracker.
@@ -75,6 +80,8 @@ type Tracker struct {
 	mu     sync.Mutex
 	period time.Time // start of the current day
 	used   map[string]time.Duration
+	extra  map[string]time.Duration
+	paused map[string]bool
 	flows  map[Flow]*tracked
 }
 
@@ -86,7 +93,13 @@ func New(cfg Config) *Tracker {
 	if cfg.Interval <= 0 {
 		cfg.Interval = time.Minute
 	}
-	return &Tracker{cfg: cfg, used: make(map[string]time.Duration), flows: make(map[Flow]*tracked)}
+	return &Tracker{
+		cfg:    cfg,
+		used:   make(map[string]time.Duration),
+		extra:  make(map[string]time.Duration),
+		paused: make(map[string]bool),
+		flows:  make(map[Flow]*tracked),
+	}
 }
 
 // PeriodStart returns the start of the day containing now.
@@ -108,18 +121,67 @@ func (t *Tracker) rollover(now time.Time) bool {
 	}
 	t.period = p
 	t.used = make(map[string]time.Duration)
+	t.extra = make(map[string]time.Duration)
+	t.paused = make(map[string]bool)
 	return true
 }
 
-// Remaining returns how much of allowance group has left today.
+// Remaining returns how much of allowance, plus extra time, group has left
+// today. A paused group has none left.
 func (t *Tracker) Remaining(group string, allowance time.Duration, now time.Time) time.Duration {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	t.rollover(now)
-	if r := allowance - t.used[group]; r > 0 {
+	if t.paused[group] {
+		return 0
+	}
+	if r := allowance + t.extra[group] - t.used[group]; r > 0 {
 		return r
 	}
 	return 0
+}
+
+// Usage is a group's use and adjustments for today.
+type Usage struct {
+	Used   time.Duration
+	Extra  time.Duration
+	Paused bool
+}
+
+// Usage returns group's usage today.
+func (t *Tracker) Usage(group string, now time.Time) Usage {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.rollover(now)
+	return Usage{Used: t.used[group], Extra: t.extra[group], Paused: t.paused[group]}
+}
+
+// AddExtra grants group d more time today (or takes it back if d is
+// negative; extra time never drops below zero) and returns the new total.
+func (t *Tracker) AddExtra(group string, d time.Duration, now time.Time) time.Duration {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.rollover(now)
+	e := max(t.extra[group]+d, 0)
+	if e == 0 {
+		delete(t.extra, group)
+	} else {
+		t.extra[group] = e
+	}
+	return e
+}
+
+// SetPaused pauses group until the next reset, or resumes it. Open flows of
+// a paused group are cut off at the next Tick.
+func (t *Tracker) SetPaused(group string, paused bool, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.rollover(now)
+	if paused {
+		t.paused[group] = true
+	} else {
+		delete(t.paused, group)
+	}
 }
 
 // Used returns group's use today.
@@ -156,7 +218,12 @@ func (t *Tracker) Flows() []Flow {
 func (t *Tracker) Tick(now time.Time, counters map[Flow]uint64, allowance func(group string) (time.Duration, bool)) TickResult {
 	t.mu.Lock()
 	defer t.mu.Unlock()
-	res := TickResult{Reset: t.rollover(now), Charged: map[string]time.Duration{}, Exhausted: map[string]time.Duration{}}
+	res := TickResult{
+		Reset:     t.rollover(now),
+		Charged:   map[string]time.Duration{},
+		Exhausted: map[string]time.Duration{},
+		Paused:    map[string]bool{},
+	}
 
 	active := map[string]uint64{}
 	for f, tr := range t.flows {
@@ -185,9 +252,14 @@ func (t *Tracker) Tick(now time.Time, counters map[Flow]uint64, allowance func(g
 			delete(t.flows, f)
 			continue
 		}
-		if t.used[tr.group] >= a {
+		switch {
+		case t.paused[tr.group]:
+			res.Cut = append(res.Cut, Cutoff{Flow: f, Group: tr.group, Info: tr.info, Paused: true})
+			res.Paused[tr.group] = true
+			delete(t.flows, f)
+		case t.used[tr.group] >= a+t.extra[tr.group]:
 			res.Cut = append(res.Cut, Cutoff{Flow: f, Group: tr.group, Info: tr.info})
-			res.Exhausted[tr.group] = a
+			res.Exhausted[tr.group] = a + t.extra[tr.group]
 			delete(t.flows, f)
 		}
 	}
@@ -199,6 +271,8 @@ func (t *Tracker) Tick(now time.Time, counters map[Flow]uint64, allowance func(g
 type state struct {
 	Period time.Time        `json:"period"`
 	Used   map[string]int64 `json:"used_seconds"`
+	Extra  map[string]int64 `json:"extra_seconds,omitempty"`
+	Paused []string         `json:"paused,omitempty"`
 	Flows  []stateFlow      `json:"flows,omitempty"`
 }
 
@@ -220,6 +294,16 @@ func (t *Tracker) Save() error {
 	for g, d := range t.used {
 		st.Used[g] = int64(d / time.Second)
 	}
+	for g, d := range t.extra {
+		if st.Extra == nil {
+			st.Extra = map[string]int64{}
+		}
+		st.Extra[g] = int64(d / time.Second)
+	}
+	for g := range t.paused {
+		st.Paused = append(st.Paused, g)
+	}
+	sort.Strings(st.Paused)
 	for f, tr := range t.flows {
 		st.Flows = append(st.Flows, stateFlow{f.Proto, f.Client, f.Server, tr.group, tr.info})
 	}
@@ -262,6 +346,12 @@ func (t *Tracker) Load(now time.Time) error {
 	if st.Period.Equal(t.period) {
 		for g, s := range st.Used {
 			t.used[g] = time.Duration(s) * time.Second
+		}
+		for g, s := range st.Extra {
+			t.extra[g] = time.Duration(s) * time.Second
+		}
+		for _, g := range st.Paused {
+			t.paused[g] = true
 		}
 	}
 	for _, sf := range st.Flows {

@@ -101,3 +101,58 @@ func TestParseErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestSetAllowanceAndUsers(t *testing.T) {
+	var b Builder
+	b.SetDefaultAllowance(30 * time.Minute)
+	if err := b.Parse(strings.NewReader(`
+mac 02:00:00:00:00:01 user=alice allow=2h
+ip  192.168.1.23      user=alice
+mac 02:00:00:00:00:02 user=bob
+`)); err != nil {
+		t.Fatal(err)
+	}
+	for _, kv := range []struct {
+		user string
+		d    time.Duration
+	}{{"alice", time.Hour}, {"bob", 0}, {"carol", 45 * time.Minute}} {
+		if err := b.SetAllowance(kv.user, kv.d); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, bad := range []struct {
+		user string
+		d    time.Duration
+	}{{"a/b", time.Hour}, {"dave", 25 * time.Hour}, {"dave", -time.Minute}} {
+		if err := b.SetAllowance(bad.user, bad.d); err == nil {
+			t.Errorf("SetAllowance(%q, %v): no error", bad.user, bad.d)
+		}
+	}
+	p := b.Policy()
+
+	m, _ := p.Match(netip.MustParseAddr("192.168.1.23"), nil, "")
+	if m.Group != "user:alice" || m.Allowance != time.Hour {
+		t.Errorf("alice match = %+v, want overridden 1h", m)
+	}
+	m, _ = p.Match(netip.MustParseAddr("192.168.1.50"), mustMAC("02:00:00:00:00:02"), "")
+	if m.Group != "user:bob" || m.Allowance != 0 {
+		t.Errorf("bob match = %+v, want group with no allowance", m)
+	}
+	if a, ok := p.Allowance("user:carol"); !ok || a != 45*time.Minute {
+		t.Errorf("Allowance(user:carol) = %v, %v", a, ok)
+	}
+
+	us := p.Users()
+	var names []string
+	for _, u := range us {
+		names = append(names, u.Name)
+	}
+	if strings.Join(names, ",") != "alice,bob,carol" {
+		t.Fatalf("Users() = %v", names)
+	}
+	if strings.Join(us[0].Rules, ";") != "mac 02:00:00:00:00:01;ip 192.168.1.23/32" || len(us[2].Rules) != 0 {
+		t.Errorf("Users() rules = %+v", us)
+	}
+}
+
+func mustMAC(s string) net.HardwareAddr { hw, _ := net.ParseMAC(s); return hw }

@@ -17,6 +17,11 @@ Sources can also get a **daily allowance**, for example 2 hours of YouTube per
 day, measured in active minutes and shared by a user's devices. See
 [Daily allowances](#daily-allowances).
 
+This repository also contains [gk-network](cmd/gk-network/README.md), a
+separate program for safe-search DNS and malware, VPN and country blocking.
+It can steer a LAN's traffic through a gokrazy box that isn't the router, so
+gk-fltr can filter it too. See [Running with gk-network](#running-with-gk-network).
+
 ## How it works
 
 1. gk-fltr installs its own nftables table, `inet gk_fltr`. The table has one
@@ -212,7 +217,8 @@ if needed:
 
 `time` is in UTC. `mac`, `host` and `ja4` are left out when unknown, and so is
 `client_label` when [no label](#naming-fingerprints) matches. `rule`
-is the rule that matched. When the file would exceed `-block-log-max-size`
+is the rule that matched. `reason` is `rule` (blocked outright),
+`allowance_exhausted` or `paused` (from the app). When the file would exceed `-block-log-max-size`
 (10 MiB by default), it is renamed to `PATH.1`, replacing any older one, and a
 new file is started. This bounds the space it uses on `/perm` to about twice
 that size. Only blocks are logged; use `-v` to see every classified flow in the
@@ -266,6 +272,78 @@ is charged in full, so someone may get up to a minute less than the full
 allowance. Changes to the rules file apply within 15 seconds. If you lower an
 allowance below what a user has already used, or remove it, their open YouTube
 connections are cut at the next usage interval.
+
+### App API
+
+gk-fltr serves an HTTPS JSON API on port 8443 that a companion app uses to
+show each user's time and to change allowances, devices, extra time and
+pauses. `-api=off` turns it off.
+
+On first start gk-fltr creates a token and a self-signed certificate in
+`-api-dir` (default `/perm/gk-fltr/api`), and logs a QR code that the app
+scans to pair. To show the QR code again, run `/user/gk-fltr pair` over
+breakglass. Anyone who has the QR code can control gk-fltr, so keep it
+private. The app's changes go to `settings.json` in `-api-dir`, not to the
+rules file, and take precedence over it.
+
+The API is for the home network only, so the app works only on home Wi-Fi.
+gk-fltr closes connections from outside the subnets of its non-uplink
+interfaces before TLS. That includes the network of an ISP router in front
+of it, even though that network is private too. Without the token, nobody on
+the home network can use the API either.
+[docs/API.md](docs/API.md) describes pairing, certificate pinning and the
+endpoints.
+
+### Running with gk-network
+
+gk-fltr normally runs on the router. With [gk-network](cmd/gk-network/README.md),
+it can also run on a box with one network interface, next to the existing
+router. gk-network uses ARP to steer the LAN's traffic through the box, which
+forwards it to the router. gk-fltr filters that forwarded traffic as it would
+on a router.
+
+gk-fltr starts gk-network itself, so one package is enough:
+
+```sh
+gok add github.com/ascension-association/gk-fltr
+```
+
+- **When it starts.** With `-network=auto` (the default), gk-fltr starts
+  gk-network once the box has had one routable interface, with the default
+  gateway, on two checks 15 seconds apart. On a router, gk-network never
+  starts. A router can look like a one-interface box briefly at boot, and
+  gk-network there would steer the uplink's network instead of the LAN.
+  `-network=on` starts it regardless, and `-network=off` never does.
+- **Settings.** `-network-args` passes flags to gk-network, separated by
+  spaces, e.g. `"-network-args=-targets=192.168.1.50,192.168.1.51 -ech"`. In
+  auto mode, gk-fltr adds `-i` with the detected interface unless you give
+  one.
+- **A separate process.** gk-network runs as `gk-fltr network`, in its own
+  process and session. If gk-fltr crashes, gk-network keeps steering and
+  serving DNS, and the restarted gk-fltr attaches to it instead of starting
+  another. If gk-network exits, gk-fltr restarts it after 10 seconds, waiting
+  longer each time up to 5 minutes. Stopping gk-fltr on purpose (SIGTERM)
+  stops gk-network too, which restores the clients' ARP caches first.
+  gk-network's log lines appear in gk-fltr's log, prefixed `gk-network:`.
+- **Only one gk-network.** If you also run it as its own package
+  (`cmd/gk-network`), gk-fltr attaches to that one instead of starting a
+  second.
+
+The two programs work together:
+
+- **Separate nftables tables.** gk-fltr's forward chain (priority -10) runs
+  before gk-network's (priority 0). A connection must pass both.
+- **They strengthen each other.** gk-network blocks Encrypted Client Hello,
+  which would hide the host name gk-fltr needs, and blocks VPNs and encrypted
+  DNS that could get around it.
+- **The app API still works.** On a box whose only interface carries the
+  default route, that interface's subnet counts as the home network.
+- **Only steered devices are filtered.** Traffic that doesn't pass through
+  the box never reaches gk-fltr.
+- **Failing closed covers the whole LAN.** Every steered device's traffic
+  passes through gk-fltr's queue. If gk-fltr is down, new connections stall
+  for all of them until it restarts, not just for restricted users.
+  `-fail-open` avoids that.
 
 ### If the nftables ruleset is flushed
 
@@ -373,6 +451,11 @@ survives minor version changes, as in `*_55b375c5d22e_*` above.
 | `-ip`, `-mac`, `-ja4` | | Rules; repeatable or comma-separated |
 | `-rules` | | Rules file; reloaded when it changes |
 | `-labels` | | File naming client software by JA4; reloaded when it changes |
+| `-api` | `:8443` | Address of the app API, or `off`; repeatable. Only the home network can connect |
+| `-api-dir` | `/perm/gk-fltr/api` | Token, TLS certificate and `settings.json` of the app API |
+| `-api-url` | | URL for the app in the pairing QR code (default: the router's first LAN address) |
+| `-network` | `auto` | Run [gk-network](#running-with-gk-network): `auto` (only on a one-interface box next to the router), `on` or `off` |
+| `-network-args` | | Flags for gk-network, separated by spaces |
 | `-allowance` | `0` | Daily allowance for rules and users without `allow=`; 0 means always blocked |
 | `-state` | | File where allowance use is kept across restarts |
 | `-reset-time`, `-timezone` | `00:00`, `Local` | When daily allowances reset |

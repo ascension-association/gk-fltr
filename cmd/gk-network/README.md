@@ -2,12 +2,22 @@
 
 Basic network safety for gokrazy. Uses targeted ARP steering to block malware and enforce family-friendly DNS.
 
+gk-network is part of the [gk-fltr](../../README.md) repository. It's a separate program that you can run alone or next to gk-fltr: it steers the LAN's traffic through the gokrazy box, and gk-fltr then applies its YouTube rules and time limits to that traffic. See [Running with gk-network](../../README.md#running-with-gk-network).
+
 ### Usage
 
+gk-fltr starts gk-network for you on a one-interface box next to the router (see [Running with gk-network](../../README.md#running-with-gk-network)), so with gk-fltr installed you don't need to add it. Pass its flags through gk-fltr's `-network-args`.
+
+To run gk-network without gk-fltr:
+
 ```
-gok add github.com/ascension-association/gk-network
+gok add github.com/ascension-association/gk-fltr/cmd/gk-network
 gok update
 ```
+
+Before steering, gk-network turns on IP forwarding and turns off ICMP redirects on its interface (`send_redirects`, for the interface and for `all`). Steered traffic leaves through the interface it arrived on, so the kernel would otherwise tell devices to send it straight to the router, past the filtering. gk-network refuses to steer if either setting doesn't take effect.
+
+gk-network is pure Go, so it needs no special build settings. To build it outside gokrazy, run `make bin/gk-network-arm64` (or `-amd64`) in the repository root.
 
 ### Example
 
@@ -23,7 +33,8 @@ Run `gk-network -help` to list all flags and their defaults.
 
 - `-i`        LAN interface (default `eth0`)
 - `-gw`       user-defined IP or `auto` to use the current router's default gateway (default `auto`)
-- `-targets`  comma-separated client IPs, or `all` to ARP-scan the subnet and steer every discovered host (self and gateway excluded; default `all`)
+- `-targets`  comma-separated client IPs, or `all` to steer every host on the subnet (self and gateway excluded; default `all`). With `all`, hosts that join later are steered too: within seconds when they announce their address (as devices do when they join the network), and otherwise at the next `-rescan`
+- `-rescan`   with `-targets=all`, how often to ARP-scan the subnet for hosts that weren't noticed joining (default `10m`; `0` disables)
 - `-dns`       listen address for the safe-search resolver (default `:53`; `""` disables)
 - `-upstream`   primary upstream DNS server (default `4.150.168.57`; `:53` assumed)
 - `-upstream2`  secondary/failover upstream DNS server (default `104.197.28.121`)

@@ -8,7 +8,8 @@
 // A rule may give its sources a daily allowance ("allow=2h"), during which
 // blocked protocols are permitted. Rules naming the same user ("user=alice")
 // share one allowance, so a user can be several devices. Rules with an
-// allowance but no user each have their own allowance.
+// allowance but no user each have their own allowance. SetAllowance
+// overrides a user's allowance, e.g. from settings made in the app.
 package policy
 
 import (
@@ -20,6 +21,7 @@ import (
 	"os"
 	"path"
 	"regexp"
+	"sort"
 	"strings"
 	"time"
 )
@@ -60,6 +62,7 @@ type Policy struct {
 type Builder struct {
 	rules      []*Rule
 	allowances map[string]time.Duration
+	overrides  map[string]time.Duration
 	def        time.Duration
 }
 
@@ -67,7 +70,31 @@ type Builder struct {
 // specify one. The default is 0 (always blocked).
 func (b *Builder) SetDefaultAllowance(d time.Duration) { b.def = d }
 
+// SetAllowance sets user's allowance, overriding allow= on their rules. A
+// zero allowance means always blocked. The user exists even without rules.
+func (b *Builder) SetAllowance(user string, d time.Duration) error {
+	if err := CheckUser(user); err != nil {
+		return err
+	}
+	if d < 0 || d > 24*time.Hour {
+		return fmt.Errorf("invalid allowance %s for user %s (at most 24h)", d, user)
+	}
+	if b.overrides == nil {
+		b.overrides = make(map[string]time.Duration)
+	}
+	b.overrides[user] = d
+	return nil
+}
+
 var userName = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
+
+// CheckUser reports whether name is a valid user name.
+func CheckUser(name string) error {
+	if !userName.MatchString(name) {
+		return fmt.Errorf("invalid user name %q (letters, digits, '_', '.', '-')", name)
+	}
+	return nil
+}
 
 // Add adds a rule given as kind ("ip", "mac" or "ja4"), value and optional
 // attributes "user=<name>" and "allow=<duration>".
@@ -118,8 +145,8 @@ func (b *Builder) Add(kind, value string, attrs ...string) error {
 		}
 		switch k {
 		case "user":
-			if !userName.MatchString(v) {
-				return fmt.Errorf("invalid user name %q (letters, digits, '_', '.', '-')", v)
+			if err := CheckUser(v); err != nil {
+				return err
 			}
 			if r.Kind == "ja4" {
 				return fmt.Errorf("user= applies to ip and mac rules only (a JA4 fingerprint identifies software, not a device)")
@@ -146,6 +173,16 @@ func (b *Builder) Add(kind, value string, attrs ...string) error {
 	}
 	b.rules = append(b.rules, r)
 	return nil
+}
+
+// Normalize returns value as a rule of kind stores it, e.g.
+// "192.168.1.23/32" for ip 192.168.1.23.
+func Normalize(kind, value string) (string, error) {
+	var b Builder
+	if err := b.Add(kind, value); err != nil {
+		return "", err
+	}
+	return b.rules[0].Value, nil
 }
 
 // AddIP, AddMAC and AddJA4 add plain rules.
@@ -208,7 +245,42 @@ func (b *Builder) Policy() *Policy {
 			p.allowances[r.user] = a
 		}
 	}
+	for u, a := range b.overrides {
+		p.allowances[u] = a
+	}
 	return p
+}
+
+// User is a user and the rules naming them.
+type User struct {
+	Name      string
+	Allowance time.Duration
+	Rules     []string // e.g. "mac aa:bb:cc:dd:ee:01"
+}
+
+// Users returns the users, sorted by name.
+func (p *Policy) Users() []User {
+	us := make([]User, 0, len(p.allowances))
+	for name, a := range p.allowances {
+		u := User{Name: name, Allowance: a}
+		for _, r := range p.rules {
+			if r.user == name {
+				u.Rules = append(u.Rules, r.String())
+			}
+		}
+		us = append(us, u)
+	}
+	sort.Slice(us, func(i, j int) bool { return us[i].Name < us[j].Name })
+	return us
+}
+
+// Counts returns the number of rules of each kind.
+func (p *Policy) Counts() map[string]int {
+	n := map[string]int{"ip": 0, "mac": 0, "ja4": 0}
+	for _, r := range p.rules {
+		n[r.Kind]++
+	}
+	return n
 }
 
 // Empty reports whether the policy has no rules (and so matches nothing).
@@ -216,10 +288,7 @@ func (p *Policy) Empty() bool { return len(p.rules) == 0 }
 
 // String summarizes the rule counts.
 func (p *Policy) String() string {
-	n := map[string]int{}
-	for _, r := range p.rules {
-		n[r.Kind]++
-	}
+	n := p.Counts()
 	s := fmt.Sprintf("%d ip, %d mac, %d ja4 rules", n["ip"], n["mac"], n["ja4"])
 	if len(p.allowances) > 0 {
 		s += fmt.Sprintf(", %d users", len(p.allowances))
